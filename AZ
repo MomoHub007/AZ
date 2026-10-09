@@ -12101,6 +12101,24 @@ function RuntimeFix.startAutoEndAction()
                     ))
                     return
                 end
+                local payoutStatus = participant.payoutStatus:get()
+                local materialsAwarded =
+                    participant.materialsAwarded:get()
+
+                if payoutStatus ~= "completed"
+                    or materialsAwarded ~= true
+                then
+                    payoutReadyAt = nil
+
+                    report(string.format(
+                        "Waiting for rewards | payoutStatus=%s"
+                        .. " | materialsAwarded=%s",
+                        tostring(payoutStatus),
+                        tostring(materialsAwarded)
+                    ))
+
+                    return
+                end
 
                 -- รอหลัง payout แล้วอ่าน Account สดก่อนตัดสินใจ
                 -- ไม่รอ JSON ของ Account ทั้งก้อนนิ่งอีกต่อไป
@@ -12133,13 +12151,44 @@ function RuntimeFix.startAutoEndAction()
                 -- ถ้าอ่านข้อมูลผิดพลาด จะไม่ส่ง Leave โดยเดา
                 local target, reason = RuntimeFix.getNextFarmStage()
 
-                local sameStage = target ~= nil
+                -- เหตุผลจาก getNextFarmStage() ในโค้ดเดิม
+                local evoFarmReasons = {
+                    ["Monarch Story resources"] = true,
+                    ["Monarch Raid resources"] = true,
+
+                    ["Sukuna Evo resources"] = true,
+
+                    ["Hu Tao Raid materials"] = true,
+                    ["Hu Tao Magic Pendant"] = true,
+                    ["Hu Tao Fine Cloth"] = true,
+                    ["Hu Tao Money/Gems"] = true,
+                }
+
+                local isEvoFarm = evoFarmReasons[reason] == true
+
+                local sameMapAndChapter = target ~= nil
                     and target.Map == currentMap
                     and target.Chapter == chapter
-                    and target.Difficulty == difficulty
 
+                local sameStage = sameMapAndChapter
+                    and (
+                        isEvoFarm
+                        or target.Difficulty == difficulty
+                    )
+
+                -- Retry เล่นซ้ำด้วย Difficulty ของรอบปัจจุบัน
                 local action = sameStage and 1 or 3
                 local actionName = sameStage and "RETRY" or "LEAVE"
+
+                if sameStage and isEvoFarm then
+                    report(string.format(
+                        "Evo materials still needed -> RETRY"
+                        .. " | Map=%s | Chapter=%d | Difficulty=%d",
+                        currentMap,
+                        chapter,
+                        difficulty
+                    ))
+                end
 
                 report(string.format(
                     "Decision: %s | Current=%s/%d/%d | Target=%s | %s",
@@ -12405,3 +12454,6 @@ task.spawn(function()
         end
     end)
 end)
+
+-- หยุด:
+-- StopAutoFarm()
