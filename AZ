@@ -934,8 +934,6 @@ function RuntimeFix.getStoryDifficulty(defaultDifficulty, forCraft)
         miyabi = true,
         cataclysm = true,
         katakuri = true,
-        shanks = true,
-        divineemperor = true,
     }
 
     local difficulty
@@ -986,13 +984,6 @@ function RuntimeFix.findCraftCarrySlot(data)
 
     if slot then
         return slot, "Mochi Commander"
-    end
-
-    slot = RuntimeFix.findOwnedSlot(data, "shanks")
-        or RuntimeFix.findOwnedSlot(data, "divineemperor")
-
-    if slot then
-        return slot, "Shanks"
     end
 
     return nil, nil
@@ -1086,7 +1077,6 @@ local AUTO_ROLL_RESULT_TIMEOUT = 30
 
 local AUTO_ROLL_TARGETS = {
     sukuna = "Cursed King",
-    shanks = "Divine Emperor",
     miyabi = "Cataclysm",
 }
 
@@ -6373,7 +6363,6 @@ local function findLowestRaritySlot(): (number?, string?)
 
     local protected = {
         sukuna = true,
-        shanks = true,
         miyabi = true,
         cataclysm = true,
         katakuri = true,
@@ -6522,7 +6511,6 @@ local function handleUnitStorageAutoReplace(): boolean
 
     local protected = {
         sukuna = true,
-        shanks = true,
         miyabi = true,
         hutao = true,
         sung_jinwoo = true,
@@ -8812,10 +8800,6 @@ function StartCustomAutoRoll()
                 return "miyabi"
             end
 
-            if character == "divineemperor" then
-                return "shanks"
-            end
-
             return character
         end
 
@@ -9358,17 +9342,11 @@ function StartCustomAutoRoll()
                 if rolledCharacter == "miyabi"
                     or rolledCharacter == "cataclysm"
                     or rolledCharacter == "katakuri"
-                    or rolledSpecialCharacterKey == "shanks"
                 then
-                    local carryName
-
-                    if rolledSpecialCharacterKey == "shanks" then
-                        carryName = "Shanks"
-                    elseif rolledCharacter == "katakuri" then
-                        carryName = "Mochi Commander"
-                    else
-                        carryName = "Miyabi"
-                    end
+                    local carryName =
+                        rolledCharacter == "katakuri"
+                        and "Mochi Commander"
+                        or "Miyabi"
 
                     finish(
                         carryName
@@ -9386,24 +9364,11 @@ function StartCustomAutoRoll()
                         local updated = RuntimeFix.readAccount()
 
                         if updated then
-                            local ownedSlot
-
-                            if rolledSpecialCharacterKey == "shanks" then
-                                ownedSlot =
-                                    RuntimeFix.findOwnedSlot(
-                                        updated,
-                                        "shanks"
-                                    )
-                                    or RuntimeFix.findOwnedSlot(
-                                        updated,
-                                        "divineemperor"
-                                    )
-                            else
-                                ownedSlot = RuntimeFix.findOwnedSlot(
+                            local ownedSlot =
+                                RuntimeFix.findOwnedSlot(
                                     updated,
                                     rolledCharacter
                                 )
-                            end
 
                             if ownedSlot then
                                 confirmed = true
@@ -10090,6 +10055,8 @@ function RuntimeFix.startKaiTunOverlay()
             label.Size = UDim2.fromScale(0.45, 0.08)
         end
 
+        jinwooStatusLabel.Size = UDim2.fromScale(0.98, 0.08)
+
         createDivider(content, 0.72)
 
         crownStatusLabel =
@@ -10460,13 +10427,33 @@ function RuntimeFix.startKaiTunOverlay()
                 or '<font color="#FF5E6A">ยังไม่ปลด</font>'
             )
 
-        jinwooStatusLabel.Text =
-            "Sung Jinwoo  |  "
-            .. (
-                ownsCharacterFromData(data, "sung_jinwoo")
-                and '<font color="#00E98B">มีตัวละคร</font>'
-                or '<font color="#FF5E6A">ไม่มี</font>'
+        local hasJinwoo =
+            ownsCharacterFromData(data, "sung_jinwoo")
+
+        if hasJinwoo then
+            local stage = RuntimeFix.monarchStage(data)
+
+            local stageTexts = {
+                [0] = "ยังไม่ Evo (0/3)",
+                [1] = "Monarch I (1/3)",
+                [2] = "Monarch II (2/3)",
+                [3] = "Monarch III (3/3) MAX",
+            }
+
+            local color = stage == 3
+                and "#00E98B"
+                or stage > 0 and "#FFD166"
+                or "#B0B6C8"
+
+            jinwooStatusLabel.Text = string.format(
+                'Sung Jinwoo  |  <font color="%s">%s</font>',
+                color,
+                stageTexts[stage] or tostring(stage)
             )
+        else
+            jinwooStatusLabel.Text =
+                'Sung Jinwoo  |  <font color="#FF5E6A">ไม่มี</font>'
+        end
 
         crownStatusLabel.Text =
             getCraftStatusRichText(
@@ -11664,9 +11651,7 @@ function RuntimeFix.routeSukunaProgression()
             chapter = 1
 
             if hasRaidCarry then
-                if carryName == "Shanks" then
-                    queueKey = "Shanks_Ready_BathTub"
-                elseif carryName == "Mochi Commander" then
+                if carryName == "Mochi Commander" then
                     queueKey = "Katakuri_Ready_BathTub"
                 else
                     queueKey = "Miyabi_Ready_BathTub"
@@ -12101,24 +12086,9 @@ function RuntimeFix.startAutoEndAction()
                     ))
                     return
                 end
-                local payoutStatus = participant.payoutStatus:get()
-                local materialsAwarded =
-                    participant.materialsAwarded:get()
+                -- The actual EndScreen only checks if travelStatus == "idle".
+                -- Payouts might take a long time or not update on client correctly.
 
-                if payoutStatus ~= "completed"
-                    or materialsAwarded ~= true
-                then
-                    payoutReadyAt = nil
-
-                    report(string.format(
-                        "Waiting for rewards | payoutStatus=%s"
-                        .. " | materialsAwarded=%s",
-                        tostring(payoutStatus),
-                        tostring(materialsAwarded)
-                    ))
-
-                    return
-                end
 
                 -- รอหลัง payout แล้วอ่าน Account สดก่อนตัดสินใจ
                 -- ไม่รอ JSON ของ Account ทั้งก้อนนิ่งอีกต่อไป
