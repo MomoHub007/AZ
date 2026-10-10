@@ -11361,17 +11361,17 @@ RuntimeFix.AutoTrait = {
     RetryAt = 0,
     Pending = nil,
 
-    Interval = 1,       -- ไม่น้อยกว่า cooldown เกม 0.8 วินาที
+    Interval = 1,
     ResponseTimeout = 10,
     SyncTimeout = 10,
 
-    Targets = { "sung_jinwoo", "hutao" },
+    Targets = {
+        "sung_jinwoo",
+    },
 
     KeepTraitIds = {
-        [13] = true, -- Ferocity
-        [14] = true, -- Supernova
-        [23] = true, -- Sniper
         [24] = true, -- Deadeye
+        [14] = true, -- Supernova
     },
 }
 
