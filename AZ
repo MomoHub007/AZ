@@ -934,6 +934,7 @@
             miyabi = true,
             cataclysm = true,
             katakuri = true,
+            sung_jinwoo = true,
         }
 
         local difficulty
@@ -5938,31 +5939,43 @@
             end
 
             if jinwooSlot then
-                if not hutaoSlot then
-                    warn("[PrepareTeam] Jinwoo owned but Hu Tao not found.")
-                    return false
-                end
+                -- มี Hu Tao ใช้ Hu Tao
+                -- ระหว่างยังไม่มี ใช้ Miyabi/Katakuri หรือ Sukuna
+                local supportSlot = hutaoSlot or carrySlot or sukunaSlot
 
                 if not equipAndVerify(jinwooSlot, 1) then
                     return false
                 end
 
-                if not equipAndVerify(hutaoSlot, 2) then
-                    return false
+                if supportSlot then
+                    if not equipAndVerify(supportSlot, 2) then
+                        return false
+                    end
                 end
 
                 local finalData = RuntimeFix.readAccount()
-                local slots = finalData and finalData.EquippedCharacterSlots
+                local slots = finalData
+                    and finalData.EquippedCharacterSlots
 
-                local confirmed = type(slots) == "table"
-                    and tonumber(slots.Slot1) == jinwooSlot
-                    and tonumber(slots.Slot2) == hutaoSlot
-
-                if confirmed then
-                    print("[PrepareTeam] CONFIRMED: Jinwoo Slot1 | Hu Tao Slot2")
+                if type(slots) ~= "table"
+                    or tonumber(slots.Slot1) ~= jinwooSlot
+                then
+                    return false
                 end
 
-                return confirmed
+                if supportSlot
+                    and tonumber(slots.Slot2) ~= supportSlot
+                then
+                    return false
+                end
+
+                print(
+                    "[PrepareTeam] CONFIRMED: Jinwoo Slot1",
+                    "| Support inventory slot:",
+                    supportSlot or "none"
+                )
+
+                return true
             end
 
             if hutaoSlot then
@@ -12657,6 +12670,54 @@
         if readyCraft then
             return nil,
                 readyCraft.Name .. " ready -> Lobby to craft"
+        end
+
+        -- ทำอุปกรณ์ให้ครบก่อนเริ่มงาน Hu Tao / Monarch
+        if RuntimeFix.canFarmRaid() then
+            local craftRecipe = nil
+
+            if not isAccessoryOwned(data, "113") then
+                craftRecipe = BLAST_ARCHER_CRAFT_REQUIREMENTS.Crown
+            elseif not isAccessoryOwned(data, "114") then
+                craftRecipe = BLAST_ARCHER_CRAFT_REQUIREMENTS.Wings
+            end
+
+            if craftRecipe then
+                local missing = {}
+
+                for id, required in pairs(craftRecipe.materials) do
+                    if getMaterialAmount(data, id) < required then
+                        missing[id] = true
+                    end
+                end
+
+                if next(missing) == nil then
+                    return nil, "Craft materials complete -> Lobby to craft"
+                end
+
+                local target = getBlastArcherFarmStage({
+                    missing = missing,
+                })
+
+                if not target then
+                    error("No craft stage for missing materials")
+                end
+
+                return stage(
+                    "hxh",
+                    target.chapter,
+                    RuntimeFix.getStoryDifficulty(
+                        target.difficulty,
+                        true
+                    )
+                ), "Crown/Wings materials"
+            end
+
+            if not isAccessoryOwned(data, "103")
+                or not isAccessoryOwned(data, "105")
+            then
+                return RuntimeFix.getBathFarmTarget(data)
+            end
         end
 
         local allAccessoriesOwned =
