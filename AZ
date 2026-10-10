@@ -2428,13 +2428,20 @@ end
 --==================================================
 
 local function getTrackedAimPosition(state)
+    if not state then
+        return nil
+    end
+
     if state.worldPosition then
-        return state.worldPosition
+        return typeof(state.worldPosition) == "Vector3"
+            and state.worldPosition
+            or nil
     end
 
     local enemy = state.target
 
     if not enemy
+        or not enemy.Parent
         or enemy ~= CurrentTarget
         or not isEnemyAlive(enemy)
     then
@@ -2443,57 +2450,72 @@ local function getTrackedAimPosition(state)
 
     local enemyRoot = getEnemyRoot(enemy)
 
-    if not enemyRoot then
+    if not enemyRoot or not enemyRoot.Parent then
         return nil
     end
 
-    local position = enemyRoot.Position
+    -- 0 = เล็งตำแหน่งจริง
+    -- เพิ่มได้เมื่อทดสอบแล้วว่าสกิลยิงตามหลังมอนที่กำลังเดิน
+    local LEAD_SECONDS = 0
+    local MAX_LEAD_DISTANCE = 1.5
+
     local velocity = enemyRoot.AssemblyLinearVelocity
-
-    -- เผื่อการเคลื่อนที่เพียงเล็กน้อย
-    -- ไม่คาดเดาล่วงหน้า 2.2 วินาที
     local lead = Vector3.new(
-        velocity.X, 0, velocity.Z
-    ) * 0.06
+        velocity.X,
+        0,
+        velocity.Z
+    ) * LEAD_SECONDS
 
-    if lead.Magnitude > 2 then
-        lead = lead.Unit * 2
+    if lead.Magnitude > MAX_LEAD_DISTANCE then
+        lead = lead.Unit * MAX_LEAD_DISTANCE
     end
 
-    position += lead
+    local position = enemyRoot.Position + lead
 
-    -- Skill 2: หาพื้นบริเวณที่มอนยืน
+    -- คงพฤติกรรมเล็งพื้นของ Skill 2 ตามโค้ดเดิม
     if state.skillKey == "2" then
-        local filter = {}
-
-        if LocalPlayer.Character then
-            table.insert(filter, LocalPlayer.Character)
-        end
-
-        table.insert(filter, enemy)
-
+        local character = LocalPlayer.Character
+        local enemies = workspace:FindFirstChild("enemies")
         local effects = workspace:FindFirstChild("effects")
 
-        if effects then
-            table.insert(filter, effects)
-        end
+        -- สร้างใหม่เฉพาะเมื่อ Instance ที่ต้องยกเว้นเปลี่ยน
+        if not state.floorRayParams
+            or state.floorCharacter ~= character
+            or state.floorEnemies ~= enemies
+            or state.floorEffects ~= effects
+        then
+            local filter = {enemy}
 
-        local params = RaycastParams.new()
-        params.FilterType = Enum.RaycastFilterType.Exclude
-        params.FilterDescendantsInstances = filter
+            if character then
+                table.insert(filter, character)
+            end
+
+            if enemies then
+                table.insert(filter, enemies)
+            end
+
+            if effects then
+                table.insert(filter, effects)
+            end
+
+            local params = RaycastParams.new()
+            params.FilterType = Enum.RaycastFilterType.Exclude
+            params.FilterDescendantsInstances = filter
+
+            state.floorRayParams = params
+            state.floorCharacter = character
+            state.floorEnemies = enemies
+            state.floorEffects = effects
+        end
 
         local result = workspace:Raycast(
             position + Vector3.new(0, 6, 0),
             Vector3.new(0, -100, 0),
-            params
+            state.floorRayParams
         )
 
         if result then
-            position = Vector3.new(
-                position.X,
-                result.Position.Y,
-                position.Z
-            )
+            position = result.Position
         end
     end
 
@@ -2618,17 +2640,28 @@ local function ensureMouseFreeSkillAPI()
         if state
             and not AutoFarmSession.Cancelled
             and AutoFarmEnabled
-            and os.clock() < state.expires
         then
-            local position = getTrackedAimPosition(state)
+            -- ติดตามต่อถ้าสกิลยังทำงาน แม้เวลาสำรองหมดแล้ว
+            local tracking =
+                isGameSkillBusy()
+                or os.clock() < state.expires
 
-            if position then
-                -- ส่งพิกัดมอนโดยตรง ไม่อ่าน Mouse.Hit
-                return position
+            if tracking then
+                local position = getTrackedAimPosition(state)
+
+                if position then
+                    state.lastValidAim = position
+                    return position
+                end
+
+                -- เป้าหมายตาย/เปลี่ยนระหว่างปล่อยสกิล:
+                -- คงจุดล่าสุด ป้องกันเป้ากระโดดกลับไปหาเมาส์
+                if state.lastValidAim then
+                    return state.lastValidAim
+                end
             end
         end
 
-        -- กรณีไม่ได้ Auto Aim ใช้งานระบบเกมตามปกติ
         return originalAim(...)
     end
 
