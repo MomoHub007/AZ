@@ -2816,12 +2816,9 @@ local function pressSkillKey(keyCode, worldPosition)
 end
 
 local function useReadySkills(worldPosition)
-    if not AZEnabled("Combat", "AutoSkills") then
-        return
-    end
-
-    if not SkillsFolder
-        or not SkillsFolder.Parent
+    if AutoFarmSession.Cancelled
+        or not AutoFarmEnabled
+        or not AZEnabled("Combat", "AutoSkills")
         or isGameSkillBusy()
     then
         return
@@ -2834,47 +2831,37 @@ local function useReadySkills(worldPosition)
     end
 
     local keyCodes = {
-        ["1"] = Enum.KeyCode.One,
-        ["2"] = Enum.KeyCode.Two,
-        ["3"] = Enum.KeyCode.Three,
+        Enum.KeyCode.One,
+        Enum.KeyCode.Two,
+        Enum.KeyCode.Three,
     }
 
-    for _, skillButton in ipairs(SkillsFolder:GetChildren()) do
-        if skillButton:IsA("ImageButton")
-            and skillButton.Name == "skillBox"
-            and skillButton.Visible
-        then
-            local frame = skillButton:FindFirstChild("Frame")
-            local cooldown = frame and frame:FindFirstChild("cd")
-            local timer = cooldown and cooldown:FindFirstChild("Txt")
+    local now = os.clock()
+    local retryDelay = math.max(
+        0.75,
+        SKILL_ACTIVATION_RETRY_DELAY
+    )
 
-            local keybind = skillButton:FindFirstChild("keybind")
-            local keyLabel = keybind and keybind:FindFirstChild("Txt")
+    local firstSlot = RuntimeFix.NextAutoSkillSlot or 1
 
-            if timer and keyLabel and timer.Text == "" then
-                local skillKey = tostring(keyLabel.Text)
-                local keyCode = keyCodes[skillKey]
+    for offset = 0, 2 do
+        local slot = ((firstSlot - 1 + offset) % 3) + 1
+        local skillKey = tostring(slot)
+        local lastAttempt = LastSkillActivation[skillKey] or 0
 
-                if keyCode then
-                    local now = os.clock()
-                    local lastActivation = LastSkillActivation[skillKey] or 0
+        if now - lastAttempt >= retryDelay then
+            -- จำกัดคำขอ แม้ Controller ปฏิเสธเพราะ Cooldown
+            LastSkillActivation[skillKey] = now
+            RuntimeFix.NextAutoSkillSlot = (slot % 3) + 1
 
-                    local retryDelay =
-                        IsHealing
-                        and 0.10
-                        or SKILL_ACTIVATION_RETRY_DELAY
+            -- Enum ใช้ระบุหมายเลขสกิลในฟังก์ชันเดิม
+            -- pressSkillKey เรียก Controller โดยตรงอยู่แล้ว
+            if pressSkillKey(keyCodes[slot], worldPosition) then
+                return
+            end
 
-                    if now - lastActivation >= retryDelay then
-                        if pressSkillKey(
-                            keyCode,
-                            worldPosition
-                        ) then
-                            LastSkillActivation[skillKey] = now
-                            print("[AutoFarm] Press Skill:", skillKey)
-                            return
-                        end
-                    end
-                end
+            if isGameSkillBusy() then
+                return
             end
         end
     end
@@ -12811,7 +12798,6 @@ task.spawn(function()
                 and roundHUD.Container.TopPart.RemainingFrame:FindFirstChild("EnemyCount")
 
             if enemyCountLabel
-                and skillsFolder
                 and areasFolder
                 and mapFolder
                 and performM1
