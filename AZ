@@ -5669,7 +5669,7 @@
             gamemode = needStory and "Story" or "Raid",
             map = needStory and "Hxh" or "ShadowGate",
             chapter = needStory and 1 or 0,
-            difficulty = RuntimeFix.getStoryDifficulty(4),
+            difficulty = 4, -- Nightmare สำหรับฟาร์ม Evo Jinwoo
             maxPlayers = 1,
             friendsOnly = false,
             roomNumber = CurrentLobbyRoomNumber,
@@ -12806,10 +12806,11 @@
             end
 
             if needStory or not RuntimeFix.canFarmRaid() then
-                return story(1, 4), "Monarch Story resources"
+                return stage("hxh", 1, 4),
+                    "Monarch Story resources"
             end
 
-            return stage("sololevelingraid", 1, RuntimeFix.getStoryDifficulty(4)),
+            return stage("sololevelingraid", 1, 4),
                 "Monarch Raid resources"
         end
 
@@ -13123,11 +13124,19 @@
                     local findingHuTao =
                         reason == "Find Hu Tao in BathTub"
 
+                    local isMonarchFarm =
+                        reason == "Monarch Story resources"
+                        or reason == "Monarch Raid resources"
+
                     local sameStage = not findingHuTao
                         and sameMapAndChapter
                         and (
                             target.Difficulty == difficulty
-                            or (isEvoFarm and not isHuTaoEvoFarm)
+                            or (
+                                isEvoFarm
+                                and not isHuTaoEvoFarm
+                                and not isMonarchFarm
+                            )
                         )
 
                     -- Retry เล่นซ้ำด้วย Difficulty ของรอบปัจจุบัน
