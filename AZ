@@ -4930,6 +4930,462 @@ function RuntimeFix.monarchClearQueue()
     return true
 end
 
+RuntimeFix.PostMonarchEvo = {
+    Pending = nil,
+    RetryAt = 0,
+    Listening = false,
+    LastMessage = nil,
+}
+
+RuntimeFix.PostMonarchRecipes = {
+    {
+        Character = "miyabi",
+        Name = "Miyabi",
+        Materials = {
+            ["101"] = 60,
+            ["103"] = 30,
+            ["108"] = 12,
+            ["112"] = 10,
+            ["110"] = 4,
+        },
+        Money = 0,
+        Gems = 3000,
+    },
+    {
+        Character = "katakuri",
+        Name = "Mochi Commander",
+        Materials = {
+            ["117"] = 50,
+            ["118"] = 75,
+        },
+        Money = 1000000,
+        Gems = 25000,
+    },
+}
+
+function RuntimeFix.postMonarchLog(message)
+    local state = RuntimeFix.PostMonarchEvo
+
+    if state.LastMessage ~= message then
+        state.LastMessage = message
+        print("[PostMonarchEvo] " .. message)
+    end
+end
+
+-- อ่านอย่างเดียว ใช้ร่วมกันทั้ง Lobby และ Retry/Leave
+function RuntimeFix.getPostMonarchPlan(data)
+    if RuntimeFix.monarchStage(data) < 3 then
+        return nil
+    end
+
+    for _, recipe in ipairs(RuntimeFix.PostMonarchRecipes) do
+        local character = recipe.Character
+        local entry = data.CharactersData
+            and data.CharactersData[character]
+
+        local inventorySlot = RuntimeFix.findOwnedSlot(
+            data,
+            character
+        )
+
+        local stored = RuntimeFix.storageCount(
+            data,
+            character
+        ) > 0
+
+        local evolved = type(entry) == "table"
+            and entry.IsUltimateUnlocked == true
+
+        if (inventorySlot or stored) and not evolved then
+            if not inventorySlot then
+                return {
+                    Recipe = recipe,
+                    NeedsStorage = true,
+                    Reason = recipe.Name .. " -> retrieve from Storage",
+                }
+            end
+
+            if type(entry) ~= "table"
+                or type(entry.IsUltimateUnlocked) ~= "boolean"
+                or type(data.material) ~= "table"
+                or type(data.currencies) ~= "table"
+            then
+                error("Evolution account data unavailable: " .. character)
+            end
+
+            local money = tonumber(data.currencies.money)
+            local gems = tonumber(data.currencies.gems)
+
+            if money == nil or gems == nil then
+                error("Money/Gems unavailable")
+            end
+
+            local missing = {}
+
+            for id, required in pairs(recipe.Materials) do
+                if (tonumber(data.material[id]) or 0) < required then
+                    missing[id] = true
+                end
+            end
+
+            local target = nil
+
+            if character == "miyabi" then
+                if missing["101"]
+                    or missing["108"]
+                    or missing["110"]
+                then
+                    target = {
+                        Map = "hxh",
+                        Chapter = 1,
+                        Difficulty = 4,
+                    }
+                elseif missing["103"] or missing["112"] then
+                    target = {
+                        Map = "hxh",
+                        Chapter = 3,
+                        Difficulty = 4,
+                    }
+                end
+            elseif missing["117"] or missing["118"] then
+                target = {
+                    Map = "sololevelingraid",
+                    Chapter = 1,
+                    Difficulty = 4,
+                }
+            end
+
+            -- เมื่อของครบแล้ว แต่เงิน/เพชรยังขาด:
+            -- ใช้ Shadow Gate ตามแหล่งฟาร์มเงิน/เพชรเดิม
+            if not target
+                and (
+                    money < recipe.Money
+                    or gems < recipe.Gems
+                )
+            then
+                target = {
+                    Map = "sololevelingraid",
+                    Chapter = 1,
+                    Difficulty = 4,
+                }
+            end
+
+            return {
+                Recipe = recipe,
+                Target = target,
+                Reason = target
+                    and (recipe.Name .. " Evo resources")
+                    or (recipe.Name .. " ready -> Lobby for Evo"),
+            }
+        end
+    end
+
+    return nil
+end
+
+function RuntimeFix.listenPostMonarchEvo(packets)
+    local state = RuntimeFix.PostMonarchEvo
+
+    if state.Listening then
+        return
+    end
+
+    local packet = packets.evolveCharacterResult
+
+    if not packet or type(packet.on) ~= "function" then
+        error("evolveCharacterResult unavailable")
+    end
+
+    local disconnect = packet:on(function(result)
+        if AutoFarmSession.Cancelled
+            or type(result) ~= "table"
+        then
+            return
+        end
+
+        local pending = state.Pending
+
+        if pending and result.character == pending.Character then
+            pending.Response = {
+                Success = result.status == "success",
+                Reason = result.status,
+            }
+        end
+    end)
+
+    table.insert(AutoFarmSession.Cleanups, function()
+        if typeof(disconnect) == "function" then
+            disconnect()
+        elseif typeof(disconnect) == "RBXScriptConnection" then
+            disconnect:Disconnect()
+        end
+    end)
+
+    state.Listening = true
+end
+
+function RuntimeFix.equipPostMonarchActive(character)
+    local data = RuntimeFix.readAccount()
+    local slot = data
+        and RuntimeFix.findOwnedSlot(data, character)
+
+    if not slot then
+        return false
+    end
+
+    local function confirmed(current)
+        local equipped = current
+            and current.EquippedCharacterSlots
+
+        return type(equipped) == "table"
+            and tonumber(equipped.Slot1) == slot
+            and current.character == character
+    end
+
+    if confirmed(data) then
+        return true
+    end
+
+    local packets = RuntimeFix.getPackets()
+    local packet = packets.equipCharacterSlot
+
+    if not packet or type(packet.fire) ~= "function" then
+        error("equipCharacterSlot unavailable")
+    end
+
+    EquipCharacterSlotRequestId =
+        EquipCharacterSlotRequestId % 65535 + 1
+
+    packet:fire({
+        slot = slot,
+        gameSlot = 1,
+        requestId = EquipCharacterSlotRequestId,
+    })
+
+    local deadline = os.clock() + 5
+
+    repeat
+        if AutoFarmSession.Cancelled then
+            return false
+        end
+
+        if confirmed(RuntimeFix.readAccount()) then
+            RuntimeFix.postMonarchLog(
+                "Active confirmed: " .. character
+            )
+            return true
+        end
+
+        task.wait(0.1)
+    until os.clock() >= deadline
+
+    RuntimeFix.postMonarchLog(
+        "Waiting for Active confirmation: " .. character
+    )
+
+    return false
+end
+
+function RuntimeFix.runPostMonarchEvo()
+    local state = RuntimeFix.PostMonarchEvo
+    local data = RuntimeFix.readAccount()
+
+    if not data or RuntimeFix.monarchStage(data) < 3 then
+        return false
+    end
+
+    -- ตรวจคำขอเดิมก่อนเลือกตัวหรือส่งคำขอใหม่
+    local pending = state.Pending
+
+    if pending then
+        local entry = data.CharactersData
+            and data.CharactersData[pending.Character]
+
+        if type(entry) == "table"
+            and entry.IsUltimateUnlocked == true
+        then
+            RuntimeFix.postMonarchLog(
+                "Evolution confirmed: " .. pending.Character
+            )
+            state.Pending = nil
+        elseif pending.Response
+            and not pending.Response.Success
+        then
+            warn(
+                "[PostMonarchEvo] Evolution rejected:",
+                pending.Character,
+                pending.Response.Reason
+            )
+
+            state.Pending = nil
+            state.RetryAt = os.clock() + 5
+            return false
+        else
+            if os.clock() - pending.SentAt >= 15 then
+                RuntimeFix.postMonarchLog(
+                    "Waiting for Account Evo confirmation: "
+                    .. pending.Character
+                    .. " | No duplicate request"
+                )
+            end
+
+            return false
+        end
+    end
+
+    if os.clock() < state.RetryAt then
+        return false
+    end
+
+    local plan = RuntimeFix.getPostMonarchPlan(data)
+
+    if not plan then
+        if not RuntimeFix.monarchClearQueue() then
+            return false
+        end
+
+        if not prepareTeam() then
+            return false
+        end
+
+        RuntimeFix.postMonarchLog(
+            "Complete | Miyabi/Katakuri evolved or not owned"
+        )
+
+        return true
+    end
+
+    if plan.NeedsStorage then
+        if not RuntimeFix.monarchClearQueue() then
+            return false
+        end
+
+        RuntimeFix.postMonarchLog(plan.Reason)
+        return false
+    end
+
+    local recipe = plan.Recipe
+    local target = plan.Target
+
+    if not target then
+        if not RuntimeFix.monarchClearQueue() then
+            return false
+        end
+
+        local packets = RuntimeFix.getPackets()
+        local packet = packets.evolveCharacter
+
+        if not packet or type(packet.fire) ~= "function" then
+            error("evolveCharacter unavailable")
+        end
+
+        RuntimeFix.listenPostMonarchEvo(packets)
+
+        if not RuntimeFix.equipPostMonarchActive(
+            recipe.Character
+        ) then
+            state.RetryAt = os.clock() + 5
+            return false
+        end
+
+        -- Equip มีการ yield: อ่านสูตรและทรัพยากรใหม่ก่อน Evo
+        local fresh = RuntimeFix.readAccount()
+        local freshPlan = fresh
+            and RuntimeFix.getPostMonarchPlan(fresh)
+
+        if not freshPlan
+            or freshPlan.NeedsStorage
+            or freshPlan.Target
+            or freshPlan.Recipe.Character ~= recipe.Character
+            or fresh.character ~= recipe.Character
+            or AutoFarmSession.Cancelled
+        then
+            return false
+        end
+
+        state.Pending = {
+            Character = recipe.Character,
+            SentAt = os.clock(),
+            Response = nil,
+        }
+
+        -- คง Pending หาก fire error เพราะคำขออาจส่งถึง Server แล้ว
+        packet:fire(recipe.Character)
+
+        RuntimeFix.postMonarchLog(
+            "Evolution requested: " .. recipe.Character
+        )
+
+        return true
+    end
+
+    local queueKey = string.format(
+        "PostMonarch_%s_%s_%d",
+        recipe.Character,
+        target.Map,
+        target.Chapter
+    )
+
+    if ActiveLobbyQueue == queueKey
+        and LastLobbyJoinAttemptClock > 0
+        and os.clock() - LastLobbyJoinAttemptClock
+            < LOBBY_JOIN_TIMEOUT_SECONDS
+    then
+        return true
+    end
+
+    local retrying = ActiveLobbyQueue == queueKey
+
+    if not RuntimeFix.monarchClearQueue() then
+        return false
+    end
+
+    if retrying then
+        cycleNextRoomNumber()
+    end
+
+    -- ใช้ทีมฟาร์มเดิมก่อนสร้างคิว
+    if not prepareTeam()
+        or AutoFarmSession.Cancelled
+        or not queueScriptOnTeleport()
+    then
+        return false
+    end
+
+    local packets = RuntimeFix.getPackets()
+    local packet = packets.createQuque
+
+    if not packet or type(packet.fire) ~= "function" then
+        error("createQuque unavailable")
+    end
+
+    ActiveLobbyQueue = queueKey
+    LastLobbyJoinAttemptClock = os.clock()
+    LastLobbyJoinAction = RuntimeFix.runMonarch
+
+    local isStory = target.Map == "hxh"
+
+    packet:fire({
+        gamemode = isStory and "Story" or "Raid",
+        map = isStory and "Hxh" or "ShadowGate",
+        chapter = isStory and target.Chapter or 0,
+        difficulty = target.Difficulty,
+        maxPlayers = 1,
+        friendsOnly = false,
+        roomNumber = CurrentLobbyRoomNumber,
+    })
+
+    RuntimeFix.postMonarchLog(string.format(
+        "%s -> %s Chapter %d Nightmare | Room %d",
+        recipe.Name,
+        target.Map,
+        target.Chapter,
+        CurrentLobbyRoomNumber
+    ))
+
+    return true
+end
+
 function RuntimeFix.monarchStep()
     local state = RuntimeFix.Monarch
 
@@ -4996,17 +5452,12 @@ function RuntimeFix.monarchStep()
     end
 
     if stage >= 3 then
-        if not RuntimeFix.monarchClearQueue() then
-            return false
-        end
-        if not prepareTeam() then
+        -- คราฟต์ไอเทมที่พร้อมก่อน ตามระบบเดิม
+        if not RuntimeFix.craftReadyAccessories() then
             return false
         end
 
-        RuntimeFix.monarchLog(
-            "Stage III complete | Jinwoo team slot 1, Hu Tao slot 2"
-        )
-        return true
+        return RuntimeFix.runPostMonarchEvo()
     end
 
     local target = stage + 1
@@ -6552,8 +7003,13 @@ local function handleUnitStorageAutoReplace(): boolean
     elseif RuntimeFix.storageCount(data, "hutao") > 0
         and not RuntimeFix.findOwnedSlot(data, "hutao")
     then
-        -- เก็บความสามารถรับ Hu Tao ของระบบเดิม
         character = "hutao"
+    elseif RuntimeFix.monarchStage(data) >= 3 then
+        local plan = RuntimeFix.getPostMonarchPlan(data)
+
+        if plan and plan.NeedsStorage then
+            character = plan.Recipe.Character
+        end
     end
 
     if not character then
@@ -6592,6 +7048,8 @@ local function handleUnitStorageAutoReplace(): boolean
     local protected = {
         sukuna = true,
         miyabi = true,
+        cataclysm = true,
+        katakuri = true,
         hutao = true,
         sung_jinwoo = true,
     }
@@ -10164,7 +10622,9 @@ function RuntimeFix.startKaiTunOverlay()
             label.Size = UDim2.fromScale(0.45, 0.08)
         end
 
-        jinwooStatusLabel.Size = UDim2.fromScale(0.98, 0.08)
+        jinwooStatusLabel.Size = UDim2.fromScale(0.98, 0.16)
+        jinwooStatusLabel.TextWrapped = true
+        jinwooStatusLabel.TextYAlignment = Enum.TextYAlignment.Top
 
         createDivider(content, 0.72)
 
@@ -10627,9 +11087,11 @@ function RuntimeFix.startKaiTunOverlay()
                 or "#B0B6C8"
 
             jinwooStatusLabel.Text = string.format(
-                'Sung Jinwoo  |  <font color="%s">%s</font>',
+                'Sung Jinwoo  |  <font color="%s">%s</font>'
+                    .. '\nTrait  |  %s',
                 color,
-                stageTexts[stage] or tostring(stage)
+                stageTexts[stage] or tostring(stage),
+                getCharacterTraitText(data, "sung_jinwoo")
             )
         else
             jinwooStatusLabel.Text =
@@ -12143,7 +12605,13 @@ function RuntimeFix.getNextFarmStage()
     if RuntimeFix.findOwnedSlot(data, "sung_jinwoo") then
         local currentStage = RuntimeFix.monarchStage(data)
         if currentStage >= 3 then
-            return nil, "Monarch Stage III complete"
+            local plan = RuntimeFix.getPostMonarchPlan(data)
+
+            if plan then
+                return plan.Target, plan.Reason
+            end
+
+            return nil, "Post-Monarch evolution complete"
         end
 
         local recipe = RuntimeFix.MonarchRecipes[currentStage + 1]
