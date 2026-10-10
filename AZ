@@ -996,18 +996,9 @@ function RuntimeFix.canFarmRaid()
         return false
     end
 
-    local characters = data.CharactersData
-    local sukuna =
-        type(characters) == "table" and characters.sukuna
-
-    if type(sukuna) ~= "table"
-        or sukuna.IsUltimateUnlocked ~= true
-    then
-        return false
-    end
-
     return RuntimeFix.findOwnedSlot(data, "sukuna") ~= nil
-        or RuntimeFix.storageCount(data, "sukuna") > 0
+        or RuntimeFix.findCraftCarrySlot(data) ~= nil
+        or RuntimeFix.findOwnedSlot(data, "sung_jinwoo") ~= nil
 end
 
 RuntimeFix.StoredPending = nil
@@ -4939,6 +4930,19 @@ RuntimeFix.PostMonarchEvo = {
 
 RuntimeFix.PostMonarchRecipes = {
     {
+        Character = "sukuna",
+        Name = "Sukuna",
+        Materials = {},
+        MaterialNames = {
+            ["Fine Cloth"] = 45,
+            ["Eyeball"] = 20,
+            ["Cursed Finger"] = 10,
+            ["Magic Pendant"] = 4,
+        },
+        Money = 0,
+        Gems = 1750,
+    },
+    {
         Character = "miyabi",
         Name = "Miyabi",
         Materials = {
@@ -5020,9 +5024,46 @@ function RuntimeFix.getPostMonarchPlan(data)
                 error("Money/Gems unavailable")
             end
 
+            local requirements = recipe.Materials
+
+            if recipe.MaterialNames then
+                local config = RuntimeFix.requireModule(
+                    ReplicatedStorage,
+                    { "assets", "config", "materialConfig" }
+                )
+
+                if type(config) ~= "table" then
+                    error("materialConfig unavailable")
+                end
+
+                requirements = {}
+                local found = {}
+
+                for id, material in pairs(config) do
+                    if type(material) == "table" then
+                        local required =
+                            recipe.MaterialNames[material.Name]
+
+                        if required then
+                            requirements[tostring(id)] = required
+                            found[material.Name] = true
+                        end
+                    end
+                end
+
+                for name in pairs(recipe.MaterialNames) do
+                    if not found[name] then
+                        error(
+                            "Sukuna evolution material missing: "
+                            .. name
+                        )
+                    end
+                end
+            end
+
             local missing = {}
 
-            for id, required in pairs(recipe.Materials) do
+            for id, required in pairs(requirements) do
                 if (tonumber(data.material[id]) or 0) < required then
                     missing[id] = true
                 end
@@ -5030,7 +5071,15 @@ function RuntimeFix.getPostMonarchPlan(data)
 
             local target = nil
 
-            if character == "miyabi" then
+            if character == "sukuna" then
+                if next(missing) ~= nil then
+                    target = {
+                        Map = "hxh",
+                        Chapter = 1,
+                        Difficulty = 4,
+                    }
+                end
+            elseif character == "miyabi" then
                 if missing["101"]
                     or missing["108"]
                     or missing["110"]
@@ -5414,6 +5463,17 @@ function RuntimeFix.monarchStep()
         or not RuntimeFix.findOwnedSlot(data, "sung_jinwoo")
     then
         return false
+    end
+
+    -- ทำ Hu Tao ให้เสร็จก่อนเริ่มขั้น Monarch ถัดไป
+    -- หากส่งคำขอ Monarch ไปแล้ว ให้จัดการผลเดิมก่อน
+    if not state.Pending then
+        local hutao = data.CharactersData
+            and data.CharactersData.hutao
+
+        if not hutao or hutao.IsUltimateUnlocked ~= true then
+            return RuntimeFix.routeSukunaProgression() == true
+        end
     end
 
     local stage = RuntimeFix.monarchStage(data)
@@ -7177,6 +7237,13 @@ function startUnitStorageWatcher()
 end
 
 function evolveSukunaIfReady()
+    local progressionData = RuntimeFix.readAccount()
+
+    if not progressionData
+        or RuntimeFix.monarchStage(progressionData) < 3
+    then
+        return false
+    end
     local craftData = getAccountDataForCraft()
 
     if not craftData
@@ -7391,6 +7458,23 @@ function getHutaoEvoStatus()
         return { isReady = false, missingStage = nil }
     end
 
+    if not RuntimeFix.findOwnedSlot(data, "hutao") then
+        if RuntimeFix.storageCount(data, "hutao") > 0 then
+            return {
+                isReady = false,
+                waitingForStorage = true,
+            }
+        end
+
+        -- ยังไม่มี Hu Tao: ฟาร์มตัวจาก BathTub ก่อน
+        -- แม้เครื่อง Evo จาก Raid จะครบแล้วก็ยังต้องหาตัวต่อ
+        return {
+            isReady = false,
+            acquiringCharacter = true,
+            missingStage = "Raid_BathTub",
+        }
+    end
+
     local hutaoData = data.CharactersData and data.CharactersData.hutao
     if hutaoData and hutaoData.IsUltimateUnlocked == true then
         return { isReady = false, isEvolved = true }
@@ -7570,6 +7654,10 @@ joinHutaoEvoFarm = function(): boolean
 
     local status = getHutaoEvoStatus()
 
+    if status.waitingForStorage then
+        return true
+    end
+
     -- คืน false เพื่อให้เส้นทาง Story เดิมทำงานต่อ
     if status.missingStage == "Raid_BathTub"
         and not RuntimeFix.canFarmRaid()
@@ -7610,7 +7698,7 @@ joinHutaoEvoFarm = function(): boolean
                 gamemode = "Raid",
                 map = "BathTub",
                 chapter = 1,
-                difficulty = RuntimeFix.getStoryDifficulty(4),
+                difficulty = 4, -- Nightmare
                 maxPlayers = 4,
                 friendsOnly = false,
                 roomNumber = CurrentLobbyRoomNumber
@@ -7623,7 +7711,7 @@ joinHutaoEvoFarm = function(): boolean
                 gamemode = "Story",
                 map = "Hxh",
                 chapter = 1,
-                difficulty = RuntimeFix.getStoryDifficulty(4), -- 1=Easy, 2=Medium, 3=Hard, 4=Nightmare
+                difficulty = 4, -- Nightmare
                 maxPlayers = 4,
                 friendsOnly = false,
                 roomNumber = CurrentLobbyRoomNumber
@@ -7636,7 +7724,7 @@ joinHutaoEvoFarm = function(): boolean
                 gamemode = "Story",
                 map = "Hxh",
                 chapter = 3,
-                difficulty = RuntimeFix.getStoryDifficulty(1), -- 1=Easy
+                difficulty = 4, -- Nightmare
                 maxPlayers = 4,
                 friendsOnly = false,
                 roomNumber = CurrentLobbyRoomNumber
@@ -12387,9 +12475,7 @@ function RuntimeFix.routeSukunaProgression()
 
     local hasRaidCarry = carrySlot ~= nil
 
-    if not hasRaidCarry
-        and not RuntimeFix.findOwnedSlot(data, "sukuna")
-    then
+    if not RuntimeFix.canFarmRaid() then
         return nil
     end
 
@@ -12430,49 +12516,27 @@ function RuntimeFix.routeSukunaProgression()
     local chapter
     local queueKey
 
-    if not evolved and not hasRaidCarry then
-        -- ขั้น 2: ลอง Evo เมื่อทรัพยากรครบ
-        -- ฟังก์ชันเดิมตรวจวัตถุดิบและ Gems 1,750
-        if not SukunaEvolveTriggered then
-            evolveSukunaIfReady()
-        end
-
-        -- ส่งคำขอแล้ว: รอ Account ยืนยันก่อนเลือก Raid
-        if SukunaEvolveTriggered then
-            local deadline = os.clock() + 5
-
-            repeat
-                if AutoFarmSession.Cancelled then
-                    return false
-                end
-
-                if isSukunaEvolved() then
-                    evolved = true
-                    break
-                end
-
-                task.wait(0.25)
-            until os.clock() >= deadline
-
-            if not evolved then
-                warn("[Progression] Waiting for Sukuna Evo confirmation.")
-                return true
-            end
-        else
-            -- วัตถุดิบหรือ Gems ยังไม่ครบ
-            gamemode = "Story"
-            map = "Hxh"
-            chapter = 1
-            queueKey = "Sukuna_Evo_Hxh1_Nightmare"
-        end
-    end
-
-    if evolved or hasRaidCarry then
+    if RuntimeFix.canFarmRaid() then
         if isHutaoEvolved() then
             return nil
         end
 
+        -- Crown/Wings ผ่านการตรวจด้านบนแล้ว
+        -- ตรวจ Scarf/Glasses ให้ครบก่อนเริ่มงาน Hu Tao
+        if not RuntimeFix.ensureBathAccessories() then
+            return true
+        end
+
         local status = getHutaoEvoStatus()
+
+        if status.waitingForStorage then
+            -- watcher Storage เดิมจะนำ Hu Tao ลงช่องที่แทนที่ได้
+            return false
+        end
+
+        if status.acquiringCharacter then
+            print("[Progression] Find Hu Tao -> BathTub Nightmare")
+        end
 
         if status.isReady then
             evolveHutaoIfReady()
@@ -12535,13 +12599,7 @@ function RuntimeFix.routeSukunaProgression()
         gamemode = gamemode,
         map = map,
         chapter = chapter,
-        difficulty = queueKey == "Sukuna_Evo_Hxh1_Nightmare"
-            and 4
-            or (
-                gamemode == "Story"
-                and RuntimeFix.getStoryDifficulty(chapter == 3 and 1 or 4)
-                or 4
-            ),
+        difficulty = 4, -- เส้นทางนี้ฟาร์ม Evo ด้วย Nightmare
         maxPlayers = 4,
         friendsOnly = false,
         roomNumber = CurrentLobbyRoomNumber,
@@ -12599,6 +12657,46 @@ function RuntimeFix.getNextFarmStage()
     if readyCraft then
         return nil,
             readyCraft.Name .. " ready -> Lobby to craft"
+    end
+
+    local allAccessoriesOwned =
+        isAccessoryOwned(data, "113") -- Crown
+        and isAccessoryOwned(data, "114") -- Wings
+        and isAccessoryOwned(data, "103") -- Capsule Scarf
+        and isAccessoryOwned(data, "105") -- Sun Glasses
+
+    if allAccessoriesOwned
+        and RuntimeFix.canFarmRaid()
+        and not evolved("hutao")
+    then
+        local status = getHutaoEvoStatus()
+
+        if status.waitingForStorage then
+            return nil, "Hu Tao in Storage -> Lobby to retrieve"
+        end
+
+        if status.acquiringCharacter then
+            return stage("spiritedawayraid", 1, 4),
+                "Find Hu Tao in BathTub"
+        end
+
+        if status.isReady then
+            return nil, "Hu Tao resources complete -> Lobby for Evo"
+        end
+
+        if status.missingStage == "Raid_BathTub"
+            or status.needCurrency
+        then
+            return stage("spiritedawayraid", 1, 4),
+                "Hu Tao BathTub resources"
+        elseif status.missingStage == "Story_Hxh_Nightmare" then
+            return stage("hxh", 1, 4), "Hu Tao Magic Pendant"
+        elseif status.missingStage == "Story_Hxh_Chapter3" then
+            return stage("hxh", 3, 4), "Hu Tao Fine Cloth"
+        end
+
+        -- ข้อมูลไม่พร้อม: ไม่เดาเป้าหมายแล้วส่ง Leave
+        error("Hu Tao progression data unavailable")
     end
 
     -- Jinwoo: ใช้ลำดับสูตร Monarch เดิม
@@ -12694,58 +12792,11 @@ function RuntimeFix.getNextFarmStage()
         end
     end
 
-    -- ไม่มี Miyabi/Katakuri: ต้อง Evo Sukuna ก่อน Raid
-    if hasSukuna and not carrySlot and not evolved("sukuna") then
-        local config = RuntimeFix.requireModule(
-            ReplicatedStorage,
-            {"assets", "config", "materialConfig"}
-        )
-
-        local required = {
-            ["Fine Cloth"] = 45,
-            ["Eyeball"] = 20,
-            ["Cursed Finger"] = 10,
-            ["Magic Pendant"] = 4,
-        }
-
-        local counts = {}
-
-        for id, entry in pairs(config) do
-            if type(entry) == "table" and required[entry.Name] then
-                counts[entry.Name] = getMaterialAmount(data, id)
-            end
-        end
-
-        local missing = false
-
-        for name, amount in pairs(required) do
-            if counts[name] == nil then
-                error("Material config unavailable: " .. name)
-            end
-
-            if counts[name] < amount then
-                missing = true
-            end
-        end
-
-        local gems = tonumber(data.currencies.gems)
-        if not gems then
-            error("Gems unavailable")
-        end
-
-        if not missing and gems >= 1750 then
-            return nil, "Sukuna resources complete -> Lobby for Evo"
-        end
-
-        -- เส้นทาง Evo Sukuna กำหนด Nightmare โดยตรง
-        return stage("hxh", 1, 4), "Sukuna Evo resources"
-    end
-
     -- ฟาร์มของ Evo Hu Tao ตามของที่ยังขาด
     if not hutaoEvolved
         and (
-            carrySlot
-            or evolved("sukuna")
+            hasSukuna
+            or carrySlot
             or RuntimeFix.findOwnedSlot(data, "hutao")
         )
     then
@@ -12756,17 +12807,17 @@ function RuntimeFix.getNextFarmStage()
         end
 
         if status.missingStage == "Raid_BathTub" then
-            if carrySlot or evolved("sukuna") then
+            if RuntimeFix.canFarmRaid() then
                 return RuntimeFix.getBathFarmTarget(data)
             end
 
-            return nil, "Sukuna Evo required before BathTub"
+            return nil, "No raid character equipped -> Lobby"
         elseif status.missingStage == "Story_Hxh_Nightmare" then
-            return story(1, 4), "Hu Tao Magic Pendant"
+            return stage("hxh", 1, 4), "Hu Tao Magic Pendant"
         elseif status.missingStage == "Story_Hxh_Chapter3" then
-            return story(3, 1), "Hu Tao Fine Cloth"
+            return stage("hxh", 3, 4), "Hu Tao Fine Cloth"
         elseif status.needCurrency then
-            if carrySlot or evolved("sukuna") then
+            if RuntimeFix.canFarmRaid() then
                 return RuntimeFix.getBathFarmTarget(data)
             end
         end
@@ -13001,10 +13052,17 @@ function RuntimeFix.startAutoEndAction()
                     and target.Map == currentMap
                     and target.Chapter == chapter
 
+                local isHuTaoEvoFarm =
+                    reason == "Hu Tao Magic Pendant"
+                    or reason == "Hu Tao Fine Cloth"
+                    or reason == "Hu Tao Raid materials"
+                    or reason == "Hu Tao Money/Gems"
+                    or reason == "Hu Tao BathTub resources"
+
                 local sameStage = sameMapAndChapter
                     and (
-                        isEvoFarm
-                        or target.Difficulty == difficulty
+                        target.Difficulty == difficulty
+                        or (isEvoFarm and not isHuTaoEvoFarm)
                     )
 
                 -- Retry เล่นซ้ำด้วย Difficulty ของรอบปัจจุบัน
