@@ -2087,94 +2087,81 @@ local function getRubbleBehindCFrame(rubble, areaName)
         or not rubble:IsA("Model")
         or not rubble.Parent
         or not AreasFolder
+        or not AreasFolder.Parent
+        or areaName == nil
     then
         return nil
     end
 
     local border = rubble.Parent
     local blocker = border:FindFirstChild("Blocker")
-    local areaIndex = tonumber(areaName)
+    local currentArea =
+        AreasFolder:FindFirstChild(tostring(areaName))
 
     if not blocker
         or not blocker:IsA("BasePart")
-        or not areaIndex
-    then
-        return nil
-    end
-
-    local currentArea =
-        AreasFolder:FindFirstChild(tostring(areaIndex))
-
-    local nextArea =
-        AreasFolder:FindFirstChild(tostring(areaIndex + 1))
-
-    if not currentArea
+        or not currentArea
         or not currentArea:IsA("BasePart")
-        or not nextArea
-        or not nextArea:IsA("BasePart")
     then
         return nil
     end
 
-    -- Direction toward next Area
-    local travel = nextArea.Position - currentArea.Position
-    travel = Vector3.new(travel.X, 0, travel.Z)
+    -- เลือกหน้าของ Blocker ที่หันหา Area ปัจจุบันโดยตรง
+    local areaLocalPosition =
+        blocker.CFrame:PointToObjectSpace(currentArea.Position)
 
-    if travel.Magnitude < 0.001 then
+    if math.abs(areaLocalPosition.Z) < 0.001 then
+        -- ไม่มีข้อมูลพอแยกสองด้าน ไม่เลือกด้านโดยเดา
         return nil
     end
 
-    travel = travel.Unit
-
-    -- Blocker forward direction
-    local normal = blocker.CFrame.LookVector
-    normal = Vector3.new(normal.X, 0, normal.Z)
-
-    if normal.Magnitude < 0.001 then
-        return nil
-    end
-
-    normal = normal.Unit
-
-    -- Select the side facing the current Area
-    if normal:Dot(travel) > 0 then
-        normal = -normal
-    end
-
+    local side = areaLocalPosition.Z > 0 and 1 or -1
     local halfDepth = blocker.Size.Z / 2
 
-    -- Behind the blocker
-    local standPosition =
-        Vector3.new(
-            blocker.Position.X,
-            RUBBLE_ROOT_Y,
-            blocker.Position.Z
+    local surfacePosition =
+        blocker.CFrame:PointToWorldSpace(
+            Vector3.new(0, 0, side * halfDepth)
         )
-        + normal * (halfDepth + RUBBLE_BEHIND_GAP)
 
-    -- Aim at the blocker's near surface
+    local outsidePosition =
+        blocker.CFrame:PointToWorldSpace(
+            Vector3.new(
+                0,
+                0,
+                side * (
+                    halfDepth + math.max(0.1, RUBBLE_BEHIND_GAP)
+                )
+            )
+        )
+
+    local standPosition = Vector3.new(
+        outsidePosition.X,
+        RUBBLE_ROOT_Y,
+        outsidePosition.Z
+    )
+
     local rubbleBar = blocker:FindFirstChild("RubbleBar")
-
     local aimY = blocker.Position.Y
 
     if rubbleBar and rubbleBar:IsA("Attachment") then
         aimY = rubbleBar.WorldPosition.Y
     end
 
-    local aimPosition =
-        Vector3.new(
-            blocker.Position.X,
-            aimY,
-            blocker.Position.Z
-        )
-        + normal * halfDepth
+    local aimPosition = Vector3.new(
+        surfacePosition.X,
+        aimY,
+        surfacePosition.Z
+    )
 
-    -- Face Rubble horizontally without looking up or down
     local facePosition = Vector3.new(
         aimPosition.X,
         standPosition.Y,
         aimPosition.Z
     )
+
+    if (facePosition - standPosition).Magnitude < 0.001 then
+        return nil
+    end
 
     return CFrame.lookAt(
         standPosition,
@@ -2209,7 +2196,7 @@ local function startRubbleHover(rubble, areaName)
         getRubbleBehindCFrame(rubble, areaName)
 
     if not targetCFrame then
-        warn("[AutoFarm] Rubble Behind position unavailable")
+        warn("[AutoFarm] Rubble FRONT position unavailable")
         return false
     end
 
@@ -2263,7 +2250,7 @@ local function startRubbleHover(rubble, areaName)
     HoverConnection = connection
 
     print(
-        "[AutoFarm] Rubble BEHIND Start ->",
+        "[AutoFarm] Rubble FRONT Start ->",
         rubble:GetFullName(),
         "| Area:",
         tostring(areaName)
