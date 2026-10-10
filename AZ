@@ -1046,7 +1046,7 @@ local MapFolder = nil
 local PerformM1 = nil
 
 --// Settings
-local BELOW_DEPTH = 5 -- อยู่ต่ำกว่า Root ของมอน 5 studs
+local BELOW_DEPTH = 6 -- อยู่ต่ำกว่า Root ของมอน 5 studs
 local ORBIT_RADIUS = 4
 local ORBIT_SECONDS_PER_REVOLUTION = 4
 -- ระยะจากผิว Rubble ถึง HumanoidRootPart
@@ -4522,6 +4522,119 @@ joinBlastArcherMaterialFarm = function(): boolean
     return true
 end
 
+-- อ่านอย่างเดียว: เลือกชิ้นที่ยังไม่มีและวัตถุดิบครบ
+function RuntimeFix.getReadyAccessoryCraft(data)
+    if type(data) ~= "table"
+        or type(data.accessory) ~= "table"
+        or type(data.material) ~= "table"
+    then
+        error("Accessory/material data unavailable")
+    end
+
+    local recipes = {}
+
+    for _, name in ipairs({"Crown", "Wings"}) do
+        local source = BLAST_ARCHER_CRAFT_REQUIREMENTS[name]
+        local materials = {}
+
+        for id, amount in pairs(source.materials) do
+            table.insert(materials, {id, amount})
+        end
+
+        table.insert(recipes, {
+            Id = source.accessoryId,
+            Index = source.craftIndex,
+            Name = source.name,
+            Materials = materials,
+        })
+    end
+
+    -- ใช้สูตร Capsule Scarf / Sun Glasses จากระบบเดิม
+    if type(RuntimeFix.BathCraftRecipes) ~= "table" then
+        error("BathCraftRecipes unavailable")
+    end
+
+    for _, recipe in ipairs(RuntimeFix.BathCraftRecipes) do
+        table.insert(recipes, recipe)
+    end
+
+    for _, recipe in ipairs(recipes) do
+        if not isAccessoryOwned(data, recipe.Id)
+            and hasCraftMaterials(data, recipe.Materials)
+        then
+            return recipe
+        end
+    end
+
+    return nil
+end
+
+-- คราฟต์เฉพาะชิ้นที่พร้อม ไม่ออกไปฟาร์มจากฟังก์ชันนี้
+function RuntimeFix.craftReadyAccessories()
+    if AutoFarmSession.Cancelled
+        or game.PlaceId ~= AUTO_JOIN_PLACE_ID
+        or RuntimeFix.Crafting
+        or ActiveLobbyQueue
+        or AutoJoinStarted
+    then
+        return false
+    end
+
+    if os.clock() < (RuntimeFix.ReadyCraftRetryAt or 0) then
+        return false
+    end
+
+    RuntimeFix.Crafting = true
+
+    local ok, result = pcall(function()
+        -- มีทั้งหมดสี่ชิ้น อ่านยอดใหม่หลังคราฟต์ทุกครั้ง
+        for _ = 1, 4 do
+            if AutoFarmSession.Cancelled then
+                return false
+            end
+
+            local data, readError = RuntimeFix.readAccount()
+
+            if not data then
+                error("Craft account unavailable: " .. tostring(readError))
+            end
+
+            local recipe = RuntimeFix.getReadyAccessoryCraft(data)
+
+            if not recipe then
+                return true
+            end
+
+            print("[AutoCraft] Ready first ->", recipe.Name)
+
+            local crafted = craftAccessoryByIndex(
+                recipe.Index,
+                recipe.Id,
+                recipe.Name,
+                recipe.Materials
+            )
+
+            if not crafted then
+                RuntimeFix.ReadyCraftRetryAt = os.clock() + 5
+                warn("[AutoCraft] Waiting for confirmation:", recipe.Name)
+                return false
+            end
+        end
+
+        return true
+    end)
+
+    RuntimeFix.Crafting = false
+
+    if not ok then
+        RuntimeFix.ReadyCraftRetryAt = os.clock() + 5
+        warn("[AutoCraft] Ready craft failed:", result)
+        return false
+    end
+
+    return result == true
+end
+
 local function StartAutoCraftBlastArcher()
     if AutoCraftBlastArcherEnabled
         or game.PlaceId ~= AUTO_JOIN_PLACE_ID
@@ -4551,61 +4664,21 @@ local function StartAutoCraftBlastArcher()
                 return
             end
 
-            for _, recipeName in ipairs({"Crown", "Wings"}) do
-                if AutoFarmSession.Cancelled then
-                    return
-                end
+            if not RuntimeFix.craftReadyAccessories() then
+                return
+            end
 
-                local craftData =
-                    BLAST_ARCHER_CRAFT_REQUIREMENTS[recipeName]
+            local currentData = getAccountDataForCraft()
 
-                local data = getAccountDataForCraft()
+            if not currentData then
+                return
+            end
 
-                if not data then
-                    return
-                end
-
-                if isAccessoryOwned(data, craftData.accessoryId) then
-                    continue
-                end
-
-                local recipe = {}
-
-                for materialId, amount in pairs(craftData.materials) do
-                    table.insert(recipe, {materialId, amount})
-                end
-
-                if not hasCraftMaterials(data, recipe) then
-                    print(
-                        "[AutoCraft] Missing materials ->",
-                        craftData.name
-                    )
-
-                    joinBlastArcherMaterialFarm()
-                    return
-                end
-
-                RuntimeFix.Crafting = true
-
-                local crafted = craftAccessoryByIndex(
-                    craftData.craftIndex,
-                    craftData.accessoryId,
-                    craftData.name,
-                    recipe
-                )
-
-                RuntimeFix.Crafting = false
-
-                if not crafted then
-                    warn(
-                        "[AutoCraft] Craft not confirmed ->",
-                        craftData.name
-                    )
-
-                    return
-                end
-
-                task.wait(0.4)
+            if not isAccessoryOwned(currentData, "113")
+                or not isAccessoryOwned(currentData, "114")
+            then
+                joinBlastArcherMaterialFarm()
+                return
             end
 
             local finalData = getAccountDataForCraft()
@@ -7032,6 +7105,11 @@ joinHutaoEvoFarm = function(): boolean
         end
         return false
     end
+    if status.missingStage == "Raid_BathTub" then
+        if not RuntimeFix.ensureBathAccessories() then
+            return true
+        end
+    end
 
     if HutaoEvoFarmStarted then
         return false
@@ -8676,6 +8754,9 @@ function joinSukunaEvoFarm()
     if SukunaEvoFarmStarted then
         return false
     end
+    if not RuntimeFix.ensureBathAccessories() then
+        return true
+    end
 
     SukunaEvoFarmStarted = true
     LastLobbyJoinAction = joinSukunaEvoFarm
@@ -9675,6 +9756,27 @@ function RuntimeFix.startKaiTunOverlay()
     local crownStatusLabel
     local wingsStatusLabel
 
+    local capsuleScarfStatusLabel
+    local sunGlassesStatusLabel
+
+    local extraCraftDisplay = {
+        CapsuleScarf = {
+            accessoryId = "103",
+            materials = {
+                ["101"] = 16,
+                ["102"] = 6,
+            },
+        },
+
+        SunGlasses = {
+            accessoryId = "105",
+            materials = {
+                ["101"] = 20,
+                ["106"] = 8,
+            },
+        },
+    }
+
     -- อยู่แยกจาก Background เพื่อให้เปิดกลับได้หลังซ่อน
     local toggle = Instance.new("TextButton")
     toggle.Name = "ToggleOverlay"
@@ -10046,11 +10148,77 @@ function RuntimeFix.startKaiTunOverlay()
 
         createDivider(content, 0.72)
 
+        local craftBlock = Instance.new("Frame")
+        craftBlock.Name = "CraftStatusBlock"
+        craftBlock.BackgroundTransparency = 1
+        craftBlock.Position = UDim2.fromScale(0.01, 0.74)
+        craftBlock.Size = UDim2.fromScale(0.98, 0.25)
+        craftBlock.ZIndex = 4
+        craftBlock.Parent = content
+
+        local function addCraftStatusRow(title, order)
+            local column = (order - 1) % 2
+            local rowIndex = math.floor((order - 1) / 2)
+
+            local row = Instance.new("Frame")
+            row.Name = "CraftRow" .. tostring(order)
+            row.BackgroundTransparency = 1
+            row.Position = UDim2.fromScale(
+                column * 0.51,
+                rowIndex * 0.51
+            )
+            row.Size = UDim2.fromScale(0.49, 0.49)
+            row.ZIndex = 4
+            row.Parent = craftBlock
+
+            local name = Instance.new("TextLabel")
+            name.BackgroundTransparency = 1
+            name.Size = UDim2.fromScale(1, 0.32)
+            name.Font = Enum.Font.GothamBold
+            name.TextScaled = true
+            name.Text = title
+            name.TextColor3 = Color3.fromRGB(240, 240, 245)
+            name.TextXAlignment = Enum.TextXAlignment.Left
+            name.ZIndex = 5
+            name.Parent = row
+
+            local nameLimit = Instance.new("UITextSizeConstraint")
+            nameLimit.MaxTextSize = 13
+            nameLimit.Parent = name
+
+            local value = Instance.new("TextLabel")
+            value.BackgroundTransparency = 1
+            value.Position = UDim2.fromScale(0, 0.35)
+            value.Size = UDim2.fromScale(1, 0.63)
+            value.Font = Enum.Font.GothamMedium
+            value.TextScaled = true
+            value.TextWrapped = true
+            value.RichText = true
+            value.Text = "รอข้อมูล"
+            value.TextColor3 = Color3.fromRGB(176, 182, 200)
+            value.TextXAlignment = Enum.TextXAlignment.Left
+            value.TextYAlignment = Enum.TextYAlignment.Top
+            value.ZIndex = 5
+            value.Parent = row
+
+            local valueLimit = Instance.new("UITextSizeConstraint")
+            valueLimit.MaxTextSize = 12
+            valueLimit.Parent = value
+
+            return value
+        end
+
         crownStatusLabel =
-            createCraftRow(content, "Blast Archer Crown", 0.76)
+            addCraftStatusRow("Blast Archer Crown", 1)
 
         wingsStatusLabel =
-            createCraftRow(content, "Blast Archer Wings", 0.88)
+            addCraftStatusRow("Blast Archer Wings", 2)
+
+        capsuleScarfStatusLabel =
+            addCraftStatusRow("Capsule Scarf", 3)
+
+        sunGlassesStatusLabel =
+            addCraftStatusRow("Sun Glasses", 4)
 
         statusLabel.Visible = false
 
@@ -10205,7 +10373,7 @@ function RuntimeFix.startKaiTunOverlay()
         end
 
         if #missing == 0 then
-            return '<font color="#FFD966">• วัตถุดิบครบ</font>'
+            return '<font color="#FFD966">• ยังไม่คราฟ — วัตถุดิบครบแล้ว</font>'
         end
 
         return '<font color="#FF5E6A">✗ ขาด: '
@@ -10354,6 +10522,8 @@ function RuntimeFix.startKaiTunOverlay()
             or not jinwooStatusLabel
             or not crownStatusLabel
             or not wingsStatusLabel
+            or not capsuleScarfStatusLabel
+            or not sunGlassesStatusLabel
         then
             return
         end
@@ -10373,6 +10543,10 @@ function RuntimeFix.startKaiTunOverlay()
 
             crownStatusLabel.Text = '<font color="#B0B6C8">?</font> รอข้อมูล'
             wingsStatusLabel.Text = '<font color="#B0B6C8">?</font> รอข้อมูล'
+            capsuleScarfStatusLabel.Text =
+                '<font color="#B0B6C8">รอข้อมูล</font>'
+            sunGlassesStatusLabel.Text =
+                '<font color="#B0B6C8">รอข้อมูล</font>'
             return
         end
 
@@ -10452,6 +10626,18 @@ function RuntimeFix.startKaiTunOverlay()
             getCraftStatusRichText(
                 data,
                 BLAST_ARCHER_CRAFT_REQUIREMENTS.Wings
+            )
+
+        capsuleScarfStatusLabel.Text =
+            getCraftStatusRichText(
+                data,
+                extraCraftDisplay.CapsuleScarf
+            )
+
+        sunGlassesStatusLabel.Text =
+            getCraftStatusRichText(
+                data,
+                extraCraftDisplay.SunGlasses
             )
     end
 
@@ -11509,6 +11695,197 @@ function RuntimeFix.runAutoTraits()
     return not AutoFarmSession.Cancelled
 end
 
+RuntimeFix.BathCraftRecipes = {
+    {
+        Id = "103",
+        Index = "3",
+        Name = "Capsule Scarf",
+        Materials = {
+            {"101", 16},
+            {"102", 6},
+        },
+    },
+    {
+        Id = "105",
+        Index = "5",
+        Name = "Sun Glasses",
+        Materials = {
+            {"101", 20},
+            {"106", 8},
+        },
+    },
+}
+
+-- อ่านอย่างเดียว ใช้ทั้งใน Lobby และระบบ Retry
+function RuntimeFix.getBathCraftNeeds(data)
+    if type(data) ~= "table"
+        or type(data.accessory) ~= "table"
+        or type(data.material) ~= "table"
+    then
+        error("BathTub accessory/material data unavailable")
+    end
+
+    for _, recipe in ipairs(RuntimeFix.BathCraftRecipes) do
+        if not isAccessoryOwned(data, recipe.Id) then
+            local enough = hasCraftMaterials(data, recipe.Materials)
+
+            return recipe, enough
+        end
+    end
+
+    return nil, true
+end
+
+-- true = มีทั้งสองชิ้นแล้ว เข้า BathTub ต่อได้
+-- false = กำลังคราฟต์/ฟาร์ม/รอยืนยัน ห้ามเข้า BathTub
+function RuntimeFix.ensureBathAccessories()
+    if AutoFarmSession.Cancelled
+        or game.PlaceId ~= AUTO_JOIN_PLACE_ID
+    then
+        return false
+    end
+
+    if RuntimeFix.Crafting or ActiveLobbyQueue then
+        return false
+    end
+
+    if os.clock() < (RuntimeFix.BathCraftRetryAt or 0) then
+        return false
+    end
+
+    if not RuntimeFix.craftReadyAccessories() then
+        return false
+    end
+
+    -- มากที่สุดสองสูตร และอ่าน Account ใหม่หลังคราฟต์แต่ละชิ้น
+    for _ = 1, 2 do
+        local data, readError = RuntimeFix.readAccount()
+
+        if not data then
+            error("Bath craft account unavailable: " .. tostring(readError))
+        end
+
+        local recipe, enough = RuntimeFix.getBathCraftNeeds(data)
+
+        if not recipe then
+            return true
+        end
+
+        if enough then
+            RuntimeFix.Crafting = true
+
+            local ok, crafted = pcall(function()
+                return craftAccessoryByIndex(
+                    recipe.Index,
+                    recipe.Id,
+                    recipe.Name,
+                    recipe.Materials
+                )
+            end)
+
+            RuntimeFix.Crafting = false
+
+            if not ok or not crafted then
+                RuntimeFix.BathCraftRetryAt = os.clock() + 5
+                warn(
+                    "[BathCraft] Craft not confirmed:",
+                    recipe.Name,
+                    ok and "Waiting for ownership" or tostring(crafted)
+                )
+                return false
+            end
+        else
+            if not prepareTeam() or AutoFarmSession.Cancelled then
+                return false
+            end
+
+            -- ทุกตัวใช้ Medium ขึ้นไป เพราะ Eyeball ไม่ดรอป Easy
+            local difficulty = math.max(
+                2,
+                RuntimeFix.getStoryDifficulty(4, true)
+            )
+
+            local packets = RuntimeFix.getPackets()
+
+            if not packets.createQuque
+                or type(packets.createQuque.fire) ~= "function"
+            then
+                error("createQuque packet unavailable")
+            end
+
+            queueScriptOnTeleport()
+
+            local queueKey = "BathCraft_Hxh1"
+            ActiveLobbyQueue = queueKey
+            LastLobbyJoinAction = autoJoinBestAvailableStory
+            LastLobbyJoinAttemptClock = os.clock()
+
+            local ok, err = pcall(function()
+                packets.createQuque:fire({
+                    gamemode = "Story",
+                    map = "Hxh",
+                    chapter = 1,
+                    difficulty = difficulty,
+                    maxPlayers = 4,
+                    friendsOnly = false,
+                    roomNumber = CurrentLobbyRoomNumber,
+                })
+            end)
+
+            if not ok then
+                if ActiveLobbyQueue == queueKey then
+                    ActiveLobbyQueue = nil
+                end
+
+                RuntimeFix.BathCraftRetryAt = os.clock() + 5
+                error(err)
+            end
+
+            print(string.format(
+                "[BathCraft] Need %s -> Hxh Chapter 1 | Difficulty %d",
+                recipe.Name,
+                difficulty
+            ))
+
+            return false
+        end
+    end
+
+    local fresh, readError = RuntimeFix.readAccount()
+
+    if not fresh then
+        error("Bath craft confirmation unavailable: " .. tostring(readError))
+    end
+
+    local remaining = RuntimeFix.getBathCraftNeeds(fresh)
+    return remaining == nil
+end
+
+function RuntimeFix.getBathFarmTarget(data)
+    local recipe, enough = RuntimeFix.getBathCraftNeeds(data)
+
+    if recipe then
+        if enough then
+            return nil, recipe.Name .. " materials complete -> Lobby to craft"
+        end
+
+        return {
+            Map = "hxh",
+            Chapter = 1,
+            Difficulty = math.max(
+                2,
+                RuntimeFix.getStoryDifficulty(4, true)
+            ),
+        }, "BathTub accessory materials"
+    end
+
+    return {
+        Map = "spiritedawayraid",
+        Chapter = 1,
+        Difficulty = 4,
+    }, "Hu Tao BathTub resources"
+end
+
 -- คืน nil = ให้เส้นทางเดิมทำงานต่อ
 -- คืน boolean = เส้นทางนี้เป็นผู้จัดการรอบปัจจุบัน
 function RuntimeFix.routeSukunaProgression()
@@ -11633,6 +12010,10 @@ function RuntimeFix.routeSukunaProgression()
         elseif status.missingStage == "Raid_BathTub"
             or status.needCurrency
         then
+            if not RuntimeFix.ensureBathAccessories() then
+                return true
+            end
+
             gamemode = "Raid"
             map = "BathTub"
             chapter = 1
@@ -11729,6 +12110,13 @@ function RuntimeFix.getNextFarmStage()
         local entry = data.CharactersData[character]
         return type(entry) == "table"
             and entry.IsUltimateUnlocked == true
+    end
+
+    local readyCraft = RuntimeFix.getReadyAccessoryCraft(data)
+
+    if readyCraft then
+        return nil,
+            readyCraft.Name .. " ready -> Lobby to craft"
     end
 
     -- Jinwoo: ใช้ลำดับสูตร Monarch เดิม
@@ -11881,8 +12269,7 @@ function RuntimeFix.getNextFarmStage()
 
         if status.missingStage == "Raid_BathTub" then
             if carrySlot or evolved("sukuna") then
-                return stage("spiritedawayraid", 1, 4),
-                    "Hu Tao Raid materials"
+                return RuntimeFix.getBathFarmTarget(data)
             end
 
             return nil, "Sukuna Evo required before BathTub"
@@ -11892,8 +12279,7 @@ function RuntimeFix.getNextFarmStage()
             return story(3, 1), "Hu Tao Fine Cloth"
         elseif status.needCurrency then
             if carrySlot or evolved("sukuna") then
-                return stage("spiritedawayraid", 1, 4),
-                    "Hu Tao Money/Gems"
+                return RuntimeFix.getBathFarmTarget(data)
             end
         end
 
@@ -12221,6 +12607,10 @@ function RuntimeFix.guardJoin(original)
 
         local ok, result = pcall(function(...)
             if outermost then
+                if not RuntimeFix.craftReadyAccessories() then
+                    return false
+                end
+
                 local routed = RuntimeFix.routeSukunaProgression()
 
                 if routed ~= nil then
