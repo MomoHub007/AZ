@@ -1788,7 +1788,7 @@
     -- Root Tween Helper
     --==================================================
 
-    RuntimeFix.TravelSpeed = 80 -- studs ต่อวินาที
+    RuntimeFix.TravelSpeed = 60 -- studs ต่อวินาที
 
     function RuntimeFix.tweenRootTo(targetCFrame, canContinue)
         local character = getCharacter()
@@ -2233,6 +2233,12 @@
                 )
         end
 
+        local TARGET_TWEEN_DISTANCE = 100
+
+        -- เก็บก่อน stopHover ล้าง CurrentTarget
+        local changingTarget =
+            not retreatMode and CurrentTarget ~= enemy
+
         stopHover()
 
         CurrentTarget = enemy
@@ -2297,8 +2303,67 @@
             enemyRoot.Position
         )
 
-        -- จัด HumanoidRootPart ให้ตรงตำแหน่ง แม้ Model pivot มี offset
-        local pivotOffset = root.CFrame:ToObjectSpace(character:GetPivot())
+        if changingTarget then
+            -- ถ้ามอนเคลื่อนหนีไกลระหว่างทาง ให้คำนวณจุดใหม่
+            while (root.Position - enemyRoot.Position).Magnitude
+                > TARGET_TWEEN_DISTANCE
+            do
+                print(
+                    "[AutoFarm] Target far -> Tween:",
+                    enemy:GetFullName(),
+                    "| Distance:",
+                    math.floor((root.Position - enemyRoot.Position).Magnitude)
+                )
+
+                local arrived = RuntimeFix.tweenRootTo(
+                    CFrame.new(initialPosition) * initialFacing,
+                    function()
+                        local targetRoot = getEnemyRoot(enemy)
+
+                        return CurrentTarget == enemy
+                            and isEnemyAlive(enemy)
+                            and targetRoot ~= nil
+                            and targetRoot.Parent ~= nil
+                    end
+                )
+
+                if not arrived then
+                    if CurrentTarget == enemy then
+                        stopHover()
+                    end
+                    return false
+                end
+
+                enemyRoot = getEnemyRoot(enemy)
+
+                if AutoFarmSession.Cancelled
+                    or getCharacter() ~= character
+                    or not root.Parent
+                    or not humanoid.Parent
+                    or humanoid.Health <= 0
+                    or CurrentTarget ~= enemy
+                    or not enemyRoot
+                    or not enemyRoot.Parent
+                    or not isEnemyAlive(enemy)
+                then
+                    if CurrentTarget == enemy then
+                        stopHover()
+                    end
+                    return false
+                end
+
+                initialPosition = getPosition(enemyRoot, isUsingSkill())
+                initialFacing = getFacing(
+                    initialPosition,
+                    enemyRoot.Position
+                )
+            end
+        end
+
+        -- อยู่ไม่เกิน 100 studs แล้ว จัดเข้าจุดตีทันที
+        local pivotOffset =
+            root.CFrame:ToObjectSpace(character:GetPivot())
+
         character:PivotTo(
             CFrame.new(initialPosition) * initialFacing * pivotOffset
         )
