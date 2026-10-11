@@ -365,6 +365,7 @@
         RubbleFloatAttachment = nil,
         ActiveRootTween = nil,
         RootTweenCleanup = nil,
+        AntiAfkStarted = false,
         TravelSpeed = 40,
     }
 
@@ -13777,6 +13778,62 @@
     joinShadowGateRaid =
         RuntimeFix.guardJoin(joinShadowGateRaid)
 
+    function RuntimeFix.startAntiAfk()
+        if RuntimeFix.AntiAfkStarted
+            or AutoFarmSession.Cancelled
+            or not LocalPlayer
+        then
+            return
+        end
+
+        local virtualUser = game:GetService("VirtualUser")
+        local lastAttemptAt = -math.huge
+        local MIN_INTERVAL = 10
+
+        local connection = LocalPlayer.Idled:Connect(function()
+            if AutoFarmSession.Cancelled then
+                return
+            end
+
+            local now = os.clock()
+
+            if now - lastAttemptAt < MIN_INTERVAL then
+                return
+            end
+
+            local camera = workspace.CurrentCamera
+
+            if not camera then
+                return
+            end
+
+            lastAttemptAt = now
+
+            local ok, err = pcall(function()
+                virtualUser:CaptureController()
+                virtualUser:ClickButton2(
+                    Vector2.new(0, 0),
+                    camera.CFrame
+                )
+            end)
+
+            if ok then
+                print("[AntiAFK] Idle input sent")
+            else
+                warn("[AntiAFK] Input failed:", err)
+            end
+        end)
+
+        RuntimeFix.AntiAfkStarted = true
+
+        table.insert(AutoFarmSession.Cleanups, function()
+            connection:Disconnect()
+            RuntimeFix.AntiAfkStarted = false
+        end)
+
+        print("[AntiAFK] Started")
+    end
+
     function RuntimeFix.startAutoStageVote()
         if RuntimeFix.StageVoteStarted
             or AutoFarmSession.Cancelled
@@ -13933,6 +13990,7 @@
     end
 
     task.spawn(function()
+        RuntimeFix.startAntiAfk()
         startAutoLeaveAfterMatch()
         RuntimeFix.startAutoStageVote()
 
