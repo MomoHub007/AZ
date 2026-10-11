@@ -5946,6 +5946,360 @@
         return false
     end
 
+    RuntimeFix.IgrisAuto = {
+        Pending = nil,
+        RetryAt = 0,
+        Listening = false,
+        LastMessage = nil,
+    }
+
+    RuntimeFix.IgrisNodeOrder = {
+        "Blade", "Speed", "Loyalty", "Command",
+    }
+
+    -- แต่ละรายการ: Money และ Materials ของระดับถัดไป
+    RuntimeFix.IgrisRecipes = {
+        Blade = {
+            {Money = 100000, Materials = {["115"] = 6}},
+            {Money = 200000, Materials = {["115"] = 10}},
+            {Money = 400000, Materials = {["115"] = 16, ["116"] = 2}},
+            {Money = 700000, Materials = {
+                ["115"] = 24, ["116"] = 4, ["119"] = 3,
+            }},
+            {Money = 1000000, Materials = {
+                ["115"] = 32, ["116"] = 6, ["119"] = 5, ["120"] = 3,
+            }},
+        },
+        Speed = {
+            {Money = 80000, Materials = {["115"] = 5}},
+            {Money = 160000, Materials = {["115"] = 9}},
+            {Money = 320000, Materials = {["115"] = 14, ["116"] = 2}},
+            {Money = 550000, Materials = {
+                ["115"] = 20, ["116"] = 3, ["119"] = 2,
+            }},
+            {Money = 800000, Materials = {
+                ["115"] = 28, ["116"] = 4, ["119"] = 4, ["120"] = 2,
+            }},
+        },
+        Loyalty = {
+            {Money = 70000, Materials = {["115"] = 4, ["116"] = 1}},
+            {Money = 140000, Materials = {["115"] = 7, ["116"] = 1}},
+            {Money = 260000, Materials = {["115"] = 11, ["116"] = 2}},
+            {Money = 420000, Materials = {
+                ["115"] = 16, ["116"] = 3, ["119"] = 2,
+            }},
+            {Money = 650000, Materials = {
+                ["115"] = 22, ["116"] = 4, ["119"] = 3, ["120"] = 1,
+            }},
+        },
+        Command = {
+            {Money = 80000, Materials = {["115"] = 5}},
+            {Money = 160000, Materials = {["115"] = 9, ["119"] = 1}},
+            {Money = 300000, Materials = {
+                ["115"] = 13, ["116"] = 1, ["119"] = 2,
+            }},
+            {Money = 500000, Materials = {
+                ["115"] = 19, ["116"] = 2, ["119"] = 3,
+            }},
+            {Money = 750000, Materials = {
+                ["115"] = 26, ["116"] = 3, ["119"] = 4, ["120"] = 1,
+            }},
+        },
+    }
+
+    function RuntimeFix.igrisLog(message)
+        local state = RuntimeFix.IgrisAuto
+        if state.LastMessage ~= message then
+            state.LastMessage = message
+            print("[AutoIgris] " .. message)
+        end
+    end
+
+    function RuntimeFix.getIgrisLevel(data, node)
+        local progress = data.achievements
+            and data.achievements.progress
+
+        if type(progress) ~= "table" then
+            error("Igris achievement data unavailable")
+        end
+
+        -- ไม่มี key หมายถึงยังไม่อัปโหนดนี้
+        local raw = progress["igris." .. node]
+        if raw == nil then
+            return 0
+        end
+
+        local level = tonumber(raw)
+        if not level or level % 1 ~= 0 or level < 0 or level > 5 then
+            error("Invalid Igris level: " .. node)
+        end
+
+        return level
+    end
+
+    function RuntimeFix.getIgrisPlan(data)
+        if RuntimeFix.monarchStage(data) < 3 then
+            error("Auto Igris requires Monarch Stage 3")
+        end
+
+        if type(data.material) ~= "table"
+            or type(data.currencies) ~= "table"
+        then
+            error("Igris resource data unavailable")
+        end
+
+        local money = tonumber(data.currencies.money)
+        if money == nil then
+            error("Igris Money unavailable")
+        end
+
+        local firstMissing = nil
+
+        for _, node in ipairs(RuntimeFix.IgrisNodeOrder) do
+            local level = RuntimeFix.getIgrisLevel(data, node)
+            local recipe = RuntimeFix.IgrisRecipes[node][level + 1]
+
+            if recipe then
+                local missing = {}
+                local affordable = money >= recipe.Money
+
+                for id, amount in pairs(recipe.Materials) do
+                    local have = getMaterialAmount(data, id)
+                    if have < amount then
+                        affordable = false
+                        table.insert(missing, string.format(
+                            "%s=%d/%d", id, have, amount
+                        ))
+                    end
+                end
+
+                if money < recipe.Money then
+                    table.insert(missing, string.format(
+                        "Money=%s/%s",
+                        tostring(money),
+                        tostring(recipe.Money)
+                    ))
+                end
+
+                local plan = {
+                    Node = node,
+                    Level = level + 1,
+                    Ready = affordable,
+                    Reason = node .. " Lv." .. (level + 1),
+                }
+
+                if affordable then
+                    plan.Reason = plan.Reason .. " ready -> Lobby"
+                    return plan
+                end
+
+                plan.Reason = plan.Reason
+                    .. " missing: " .. table.concat(missing, ", ")
+
+                firstMissing = firstMissing or plan
+            end
+        end
+
+        if firstMissing then
+            firstMissing.Target = {
+                Map = "sololevelingraid",
+                Chapter = 1,
+                Difficulty = 4,
+            }
+        end
+
+        return firstMissing
+    end
+
+    function RuntimeFix.listenIgrisResult(packets)
+        local state = RuntimeFix.IgrisAuto
+        if state.Listening then
+            return
+        end
+
+        local packet = packets.igrisUpgradeResult
+        if not packet or type(packet.on) ~= "function" then
+            error("igrisUpgradeResult unavailable")
+        end
+
+        local disconnect = packet:on(function(result)
+            if AutoFarmSession.Cancelled
+                or type(result) ~= "table"
+            then
+                return
+            end
+
+            local pending = state.Pending
+            if pending and result.node == pending.Node then
+                pending.Response = {
+                    Success = result.success == true,
+                    Level = result.level,
+                    Reason = result.reason,
+                }
+            end
+        end)
+
+        table.insert(AutoFarmSession.Cleanups, function()
+            if typeof(disconnect) == "function" then
+                disconnect()
+            elseif typeof(disconnect) == "RBXScriptConnection" then
+                disconnect:Disconnect()
+            end
+        end)
+
+        state.Listening = true
+    end
+
+    function RuntimeFix.runAutoIgris()
+        if AutoFarmSession.Cancelled
+            or game.PlaceId ~= AUTO_JOIN_PLACE_ID
+        then
+            return false
+        end
+
+        local state = RuntimeFix.IgrisAuto
+        local data = RuntimeFix.readAccount()
+        if not data then
+            return false
+        end
+
+        local pending = state.Pending
+        if pending then
+            local level = RuntimeFix.getIgrisLevel(data, pending.Node)
+
+            if level >= pending.Level then
+                RuntimeFix.igrisLog(string.format(
+                    "Confirmed: %s Lv.%d", pending.Node, level
+                ))
+                state.Pending = nil
+            elseif pending.Response
+                and not pending.Response.Success
+            then
+                warn(
+                    "[AutoIgris] Rejected:",
+                    pending.Node,
+                    pending.Response.Reason
+                )
+                state.Pending = nil
+                state.RetryAt = os.clock() + 5
+                return false
+            else
+                if os.clock() - pending.SentAt >= 15 then
+                    RuntimeFix.igrisLog(
+                        "Waiting for Account confirmation: "
+                        .. pending.Node
+                        .. " | No duplicate request"
+                    )
+                end
+                return false
+            end
+        end
+
+        if os.clock() < state.RetryAt then
+            return false
+        end
+
+        local plan = RuntimeFix.getIgrisPlan(data)
+        if not plan then
+            if not RuntimeFix.monarchClearQueue()
+                or not prepareTeam()
+            then
+                return false
+            end
+
+            RuntimeFix.igrisLog("Complete | All nodes Lv.5")
+            return true
+        end
+
+        if plan.Ready then
+            if not RuntimeFix.monarchClearQueue() then
+                return false
+            end
+
+            local packets = RuntimeFix.getPackets()
+            local packet = packets.igrisUpgrade
+            if not packet or type(packet.fire) ~= "function" then
+                error("igrisUpgrade unavailable")
+            end
+
+            RuntimeFix.listenIgrisResult(packets)
+
+            -- การออกคิวอาจ yield จึงตรวจข้อมูลใหม่ก่อนใช้ทรัพยากร
+            local fresh = RuntimeFix.readAccount()
+            if not fresh or AutoFarmSession.Cancelled then
+                return false
+            end
+
+            local freshPlan = RuntimeFix.getIgrisPlan(fresh)
+            if not freshPlan or not freshPlan.Ready then
+                return false
+            end
+
+            state.Pending = {
+                Node = freshPlan.Node,
+                Level = freshPlan.Level,
+                SentAt = os.clock(),
+                Response = nil,
+            }
+
+            -- เก็บ Pending ก่อนส่ง เพื่อรองรับผลที่กลับมาเร็ว
+            packet:fire(freshPlan.Node)
+            RuntimeFix.igrisLog(string.format(
+                "Requested: %s Lv.%d",
+                freshPlan.Node,
+                freshPlan.Level
+            ))
+            return true
+        end
+
+        local queueKey = "Igris_ShadowGate"
+
+        if ActiveLobbyQueue == queueKey
+            and LastLobbyJoinAttemptClock > 0
+            and os.clock() - LastLobbyJoinAttemptClock
+                < LOBBY_JOIN_TIMEOUT_SECONDS
+        then
+            return true
+        end
+
+        local retrying = ActiveLobbyQueue == queueKey
+        if not RuntimeFix.monarchClearQueue() then
+            return false
+        end
+
+        if retrying then
+            cycleNextRoomNumber()
+        end
+
+        if not prepareTeam()
+            or AutoFarmSession.Cancelled
+            or not queueScriptOnTeleport()
+        then
+            return false
+        end
+
+        ActiveLobbyQueue = queueKey
+        LastLobbyJoinAttemptClock = os.clock()
+        LastLobbyJoinAction = RuntimeFix.runMonarch
+
+        RuntimeFix.createQueue({
+            gamemode = "Raid",
+            map = "ShadowGate",
+            chapter = 0,
+            floor = 0,
+            difficulty = 4,
+            maxPlayers = 1,
+            friendsOnly = false,
+            roomNumber = CurrentLobbyRoomNumber,
+        })
+
+        RuntimeFix.igrisLog(
+            plan.Reason .. " -> Shadow Gate | Room "
+            .. CurrentLobbyRoomNumber
+        )
+        return true
+    end
+
     function RuntimeFix.runPostMonarchEvo()
         local state = RuntimeFix.PostMonarchEvo
         local data = RuntimeFix.readAccount()
@@ -6000,19 +6354,7 @@
         local plan = RuntimeFix.getPostMonarchPlan(data)
 
         if not plan then
-            if not RuntimeFix.monarchClearQueue() then
-                return false
-            end
-
-            if not prepareTeam() then
-                return false
-            end
-
-            RuntimeFix.postMonarchLog(
-                "Complete | Miyabi/Katakuri evolved or not owned"
-            )
-
-            return true
+            return RuntimeFix.runAutoIgris()
         end
 
         if plan.NeedsStorage then
@@ -13384,7 +13726,15 @@
                     return plan.Target, plan.Reason
                 end
 
-                return nil, "Post-Monarch evolution complete"
+                local igrisPlan = RuntimeFix.getIgrisPlan(data)
+
+                if igrisPlan then
+                    -- Target มีค่า: ฟาร์ม Shadow Gate ต่อ
+                    -- Target เป็น nil: กลับ Lobby เพื่อ Upgrade
+                    return igrisPlan.Target, igrisPlan.Reason
+                end
+
+                return nil, "Evolution and Igris upgrades complete"
             end
 
             local recipe = RuntimeFix.MonarchRecipes[currentStage + 1]
