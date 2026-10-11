@@ -359,6 +359,13 @@
         QueueStatus = nil,
         QueueIdleRevision = 0,
         QueueListenerStarted = false,
+        StageVoteStarted = false,
+        RubbleRepeatToken = nil,
+        RubbleFloatForce = nil,
+        RubbleFloatAttachment = nil,
+        ActiveRootTween = nil,
+        RootTweenCleanup = nil,
+        TravelSpeed = 40,
     }
 
     function RuntimeFix.requireModule(root, path)
@@ -384,6 +391,244 @@
             ReplicatedStorage,
             {"lobby", "packets"}
         )
+    end
+
+    function RuntimeFix.enterQueueRoom(roomNumber, packets)
+        local ENTRY_TIMEOUT = 8
+        local HEIGHT_OFFSET = 2
+
+        if AutoFarmSession.Cancelled
+            or game.PlaceId ~= AUTO_JOIN_PLACE_ID
+        then
+            error("Queue entry cancelled or outside Lobby")
+        end
+
+        local systems = workspace:FindFirstChild("Systems")
+        local rooms = systems and systems:FindFirstChild("QuqueRooms")
+        local room = rooms and rooms:FindFirstChild(tostring(roomNumber))
+        local inside = room and room:FindFirstChild("Inside")
+        local hitbox = room and room:FindFirstChild("JoinHitbox")
+
+        if not inside or not inside:IsA("BasePart")
+            or not hitbox or not hitbox:IsA("BasePart")
+        then
+            error("Queue room parts unavailable: " .. tostring(roomNumber))
+        end
+
+        local character = LocalPlayer.Character
+        local root = character
+            and character:FindFirstChild("HumanoidRootPart")
+        local humanoid = character
+            and character:FindFirstChildOfClass("Humanoid")
+
+        if not root or not root:IsA("BasePart")
+            or not humanoid or humanoid.Health <= 0
+        then
+            error("Alive character/root unavailable for queue entry")
+        end
+
+        local windowPacket = packets and packets.toggleQuqueWindow
+
+        if not windowPacket or type(windowPacket.on) ~= "function" then
+            error("toggleQuqueWindow packet unavailable")
+        end
+
+        local confirmedRoom = nil
+        local listening = true
+
+        -- ลงทะเบียนก่อนย้าย เพื่อรับคำยืนยันจาก Server
+        local connection = windowPacket:on(function(payload)
+            if not listening or AutoFarmSession.Cancelled then
+                return
+            end
+
+            if type(payload) ~= "table" then
+                return
+            end
+
+            if payload.open then
+                confirmedRoom = tonumber(payload.roomNumber)
+            else
+                confirmedRoom = nil
+            end
+        end)
+
+        local cleaned = false
+
+        local function cleanup()
+            if cleaned then
+                return
+            end
+
+            cleaned = true
+            listening = false
+
+            if typeof(connection) == "function" then
+                pcall(connection)
+            elseif typeof(connection) == "RBXScriptConnection" then
+                connection:Disconnect()
+            end
+        end
+
+        if typeof(connection) ~= "function"
+            and typeof(connection) ~= "RBXScriptConnection"
+        then
+            cleanup()
+            error("Unsupported toggleQuqueWindow listener handle")
+        end
+
+        -- รองรับการหยุด session ระหว่างรอ
+        table.insert(AutoFarmSession.Cleanups, cleanup)
+
+        local ok, entryError = pcall(function()
+            local destination =
+                inside.Position + Vector3.new(0, HEIGHT_OFFSET, 0)
+
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+
+            -- ย้ายครั้งเดียว ไม่ล็อกตำแหน่งทุกเฟรม
+            root.CFrame =
+                CFrame.new(destination) * root.CFrame.Rotation
+
+            print("[AutoJoin] Moving into queue room:", roomNumber)
+
+            local deadline = os.clock() + ENTRY_TIMEOUT
+
+            repeat
+                if AutoFarmSession.Cancelled
+                    or game.PlaceId ~= AUTO_JOIN_PLACE_ID
+                    or LocalPlayer.Character ~= character
+                    or not root.Parent
+                    or humanoid.Health <= 0
+                then
+                    error("Queue entry interrupted")
+                end
+
+                local attributeRoom =
+                    tonumber(LocalPlayer:GetAttribute("QueueRoom"))
+
+                if confirmedRoom == roomNumber
+                    or attributeRoom == roomNumber
+                then
+                    print(
+                        "[AutoJoin] Room entry confirmed:",
+                        roomNumber
+                    )
+                    return
+                end
+
+                task.wait(0.1)
+            until os.clock() >= deadline
+
+            error(string.format(
+                "Room entry timed out | Requested=%s QueueRoom=%s WindowRoom=%s",
+                tostring(roomNumber),
+                tostring(LocalPlayer:GetAttribute("QueueRoom")),
+                tostring(confirmedRoom)
+            ))
+        end)
+
+        cleanup()
+
+        if not ok then
+            error(entryError, 0)
+        end
+    end
+
+    function RuntimeFix.createQueue(payload)
+        if AutoFarmSession.Cancelled
+            or game.PlaceId ~= AUTO_JOIN_PLACE_ID
+        then
+            return false
+        end
+
+        if type(payload) ~= "table" then
+            error("Queue payload must be a table")
+        end
+
+        -- ฟังก์ชันนี้รองรับเส้นทาง Story/Raid ของสคริปต์เดิม
+        if payload.gamemode ~= "Story"
+            and payload.gamemode ~= "Raid"
+        then
+            error("Unsupported queue mode: " .. tostring(payload.gamemode))
+        end
+
+        local request = {}
+
+        for key, value in pairs(payload) do
+            request[key] = value
+        end
+
+        request.floor = 0
+
+        if request.gamemode == "Raid" then
+            request.chapter = 0
+            request.difficulty = 4
+        end
+
+        local function requireInteger(name, minimum, maximum)
+            local value = request[name]
+
+            if type(value) ~= "number"
+                or value ~= value
+                or value % 1 ~= 0
+                or value < minimum
+                or value > maximum
+            then
+                error("Invalid queue field: " .. name)
+            end
+        end
+
+        if type(request.map) ~= "string" or request.map == "" then
+            error("Invalid queue map")
+        end
+
+        if type(request.friendsOnly) ~= "boolean" then
+            error("Invalid queue friendsOnly")
+        end
+
+        requireInteger("chapter", 0, 3)
+        requireInteger("floor", 0, 0)
+        requireInteger("difficulty", 1, 4)
+        requireInteger("maxPlayers", 1, 6)
+        requireInteger("roomNumber", 1, 6)
+
+        local packets = RuntimeFix.getPackets()
+        local packet = packets and packets.createQuque
+
+        if not packet or type(packet.fire) ~= "function" then
+            error("createQuque packet unavailable")
+        end
+
+        -- เข้าเขตห้องและรอ Server ยืนยันก่อนสร้างคิว
+        RuntimeFix.enterQueueRoom(request.roomNumber, packets)
+
+        if AutoFarmSession.Cancelled then
+            error("Queue creation cancelled")
+        end
+
+        if LocalPlayer:GetAttribute("MatchSearching") then
+            error("Queue creation blocked: MatchSearching")
+        end
+
+        -- ใช้ serializer ของเกมปัจจุบัน
+        packet:fire(request)
+
+        print(string.format(
+            "[AutoJoin] Queue requested | %s/%s"
+                .. " | Chapter=%d Floor=%d Difficulty=%d"
+                .. " | Players=%d Room=%d",
+            request.gamemode,
+            request.map,
+            request.chapter,
+            request.floor,
+            request.difficulty,
+            request.maxPlayers,
+            request.roomNumber
+        ))
+
+        return true
     end
 
     function RuntimeFix.readAccount()
@@ -458,6 +703,7 @@
 
     local AutoClaimRewardsStarted = false
     RuntimeFix.AutoClaimInitialReady = false
+    RuntimeFix.AutoClaimJoinReleased = false
 
     function StartAutoClaimRewards()
         local AUTO_CLAIM_SCAN_DELAY = 20
@@ -1538,11 +1784,221 @@
     end
 
     --==================================================
+    -- Root Tween Helper
+    --==================================================
+
+    RuntimeFix.TravelSpeed = 80 -- studs ต่อวินาที
+
+    function RuntimeFix.tweenRootTo(targetCFrame, canContinue)
+        local character = getCharacter()
+        local root = getCharacterRoot()
+        local humanoid = getHumanoid()
+
+        if AutoFarmSession.Cancelled
+            or not AutoFarmEnabled
+            or not character
+            or not root
+            or not root.Parent
+            or not humanoid
+            or humanoid.Health <= 0
+        then
+            return false
+        end
+
+        if canContinue and not canContinue() then
+            return false
+        end
+
+        -- จบงานเดิมพร้อมคืนค่าก่อนเริ่มงานใหม่
+        if RuntimeFix.RootTweenCleanup then
+            RuntimeFix.RootTweenCleanup()
+        end
+
+        local previous = RuntimeFix.ActiveRootTween
+        RuntimeFix.ActiveRootTween = nil
+
+        if previous then
+            previous:Cancel()
+        end
+
+        local originalAutoRotate = humanoid.AutoRotate
+        local rubbleForce = RuntimeFix.RubbleFloatForce
+        local originalForceEnabled = nil
+
+        if rubbleForce and rubbleForce.Parent then
+            originalForceEnabled = rubbleForce.Enabled
+            rubbleForce.Enabled = false
+        end
+
+        root.Anchored = false
+        humanoid.AutoRotate = false
+        humanoid:Move(Vector3.zero, false)
+
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+
+        -- ชดเชยแรงโน้มถ่วงเฉพาะระหว่างเดินทาง
+        local attachment = Instance.new("Attachment")
+        attachment.Name = "AutoTravelAttachment"
+        attachment.Parent = root
+
+        local lift = Instance.new("VectorForce")
+        lift.Name = "AutoTravelLift"
+        lift.Attachment0 = attachment
+        lift.RelativeTo = Enum.ActuatorRelativeTo.World
+        lift.ApplyAtCenterOfMass = true
+        lift.Parent = root
+
+        local distance =
+            (root.Position - targetCFrame.Position).Magnitude
+
+        local speed = math.max(RuntimeFix.TravelSpeed, 1)
+        local duration = distance / speed
+
+        local tween = game:GetService("TweenService"):Create(
+            root,
+            TweenInfo.new(
+                duration,
+                Enum.EasingStyle.Linear,
+                Enum.EasingDirection.InOut
+            ),
+            { CFrame = targetCFrame }
+        )
+
+        local cleaned = false
+        local cleanup
+
+        cleanup = function()
+            if cleaned then
+                return
+            end
+
+            cleaned = true
+
+            if RuntimeFix.RootTweenCleanup == cleanup then
+                RuntimeFix.RootTweenCleanup = nil
+            end
+
+            if RuntimeFix.ActiveRootTween == tween then
+                RuntimeFix.ActiveRootTween = nil
+            end
+
+            tween:Cancel()
+            tween:Destroy()
+            lift:Destroy()
+            attachment:Destroy()
+
+            if rubbleForce
+                and rubbleForce.Parent
+                and RuntimeFix.RubbleFloatForce == rubbleForce
+                and originalForceEnabled ~= nil
+            then
+                rubbleForce.Enabled = originalForceEnabled
+            end
+
+            if getCharacter() == character and humanoid.Parent then
+                humanoid.AutoRotate = originalAutoRotate
+            end
+        end
+
+        RuntimeFix.RootTweenCleanup = cleanup
+        RuntimeFix.ActiveRootTween = tween
+
+        local arrived = false
+
+        local ok, err = pcall(function()
+            local function updateLift()
+                local mass = root.AssemblyMass
+
+                if root.Anchored or mass <= 0 or mass == math.huge then
+                    error("Travel assembly is anchored or has invalid mass")
+                end
+
+                lift.Force = Vector3.new(
+                    0,
+                    mass * workspace.Gravity,
+                    0
+                )
+            end
+
+            updateLift()
+            tween:Play()
+
+            local deadline = os.clock() + duration + 2
+
+            while not cleaned
+                and RuntimeFix.ActiveRootTween == tween
+                and not AutoFarmSession.Cancelled
+                and AutoFarmEnabled
+                and not RuntimeFix.EndRoundPaused
+                and getCharacter() == character
+                and root.Parent
+                and humanoid.Parent
+                and humanoid.Health > 0
+                and os.clock() < deadline
+            do
+                if canContinue and not canContinue() then
+                    break
+                end
+
+                if tween.PlaybackState == Enum.PlaybackState.Completed then
+                    arrived =
+                        (root.Position - targetCFrame.Position).Magnitude <= 3
+                    break
+                end
+
+                if tween.PlaybackState == Enum.PlaybackState.Cancelled then
+                    break
+                end
+
+                updateLift()
+                task.wait(0.05)
+            end
+        end)
+
+        cleanup()
+
+        if not ok then
+            warn("[AutoTween] Failed:", err)
+            return false
+        end
+
+        return arrived
+    end
+
+    --==================================================
     -- Cleanup Hover
     --==================================================
 
     -- โหมดทดลอง: ร่างจริงอยู่เหนือมอน ร่างปลอมอยู่ใกล้มอน
     local function stopHover()
+        if RuntimeFix.RootTweenCleanup then
+            RuntimeFix.RootTweenCleanup()
+        end
+
+        local activeTween = RuntimeFix.ActiveRootTween
+        RuntimeFix.ActiveRootTween = nil
+
+        if activeTween then
+            activeTween:Cancel()
+        end
+
+        RuntimeFix.RubbleRepeatToken = nil
+
+        local rubbleForce = RuntimeFix.RubbleFloatForce
+        RuntimeFix.RubbleFloatForce = nil
+
+        if rubbleForce then
+            rubbleForce:Destroy()
+        end
+
+        local rubbleAttachment = RuntimeFix.RubbleFloatAttachment
+        RuntimeFix.RubbleFloatAttachment = nil
+
+        if rubbleAttachment then
+            rubbleAttachment:Destroy()
+        end
+
         local waiting = RuntimeFix.WaitingStand
         RuntimeFix.WaitingStand = nil
 
@@ -1613,6 +2069,12 @@
         end
 
         local areaKey = tostring(areaName)
+
+        if getNearestEnemyInArea(areaKey) then
+            stopHover()
+            return false
+        end
+
         local areaPart = getAreaPart(areaName)
 
         if not areaPart then
@@ -1647,16 +2109,25 @@
         local targetPosition =
             areaPart.Position + Vector3.new(0, AREA_HEIGHT_OFFSET, 0)
 
-        local pivotOffset =
-            root.CFrame:ToObjectSpace(character:GetPivot())
-
         humanoid:Move(Vector3.zero, false)
         humanoid.AutoRotate = true
         root.CanCollide = true
 
-        character:PivotTo(
-            CFrame.new(targetPosition) * pivotOffset
+        local arrived = RuntimeFix.tweenRootTo(
+            CFrame.new(targetPosition),
+            function()
+                return areaPart.Parent ~= nil
+                    and getNearestEnemyInArea(areaKey) == nil
+            end
         )
+
+        if not arrived then
+            if root.Parent then
+                root.CanCollide = wasCanCollide
+            end
+
+            return false
+        end
 
         root.AssemblyLinearVelocity = Vector3.zero
         root.AssemblyAngularVelocity = Vector3.zero
@@ -1665,7 +2136,7 @@
             Root = root,
             Area = areaKey,
             WasCanCollide = wasCanCollide,
-            LastTeleportAt = now,
+            LastTeleportAt = os.clock(),
         }
 
         print(
@@ -2015,18 +2486,54 @@
             return false
         end
 
+        local areaKey = tostring(area.Name)
+
+        local function hasEnemy()
+            return getNearestEnemyInArea(areaKey) ~= nil
+        end
+
         stopHover()
+        CurrentAreaName = area.Name
+
+        -- มีมอนแล้ว ให้ลูปหลักเข้าต่อสู้ทันที
+        if hasEnemy() then
+            LastTeleportedArea = area.Name
+            print("[AutoFarm] Enemy available -> skip Area center")
+            return true
+        end
 
         local targetPosition =
-            area.Position
-            + Vector3.new(0, AREA_HEIGHT_OFFSET, 0)
+            area.Position + Vector3.new(0, AREA_HEIGHT_OFFSET, 0)
 
-        character:PivotTo(CFrame.new(targetPosition))
+        local arrived = RuntimeFix.tweenRootTo(
+            CFrame.new(targetPosition),
+            function()
+                return area.Parent ~= nil and not hasEnemy()
+            end
+        )
 
-        CurrentAreaName = area.Name
+        if AutoFarmSession.Cancelled or not AutoFarmEnabled then
+            return false
+        end
+
+        -- มอนเกิดระหว่างทาง: Tween ถูกยกเลิกแล้ว
+        if hasEnemy() then
+            LastTeleportedArea = area.Name
+
+            print(
+                "[AutoFarm] Enemy spawned -> cancel center travel | Area:",
+                areaKey
+            )
+
+            return true
+        end
+
+        if not arrived then
+            return false
+        end
+
         LastTeleportedArea = area.Name
-
-        print("[AutoFarm] Area:", area.Name, "Position:", targetPosition)
+        print("[AutoFarm] Area center reached:", areaKey)
 
         return true
     end
@@ -2073,6 +2580,13 @@
     --==================================================
     -- Rubble Behind Position
     --==================================================
+
+    RuntimeFix.RubbleFrontPositions = {
+        ["1"] = Vector3.new(-19, 3, 150),
+        ["2"] = Vector3.new(-13, 3, -94),
+        ["3"] = Vector3.new(283, 3, -204),
+        ["4"] = Vector3.new(582, 3, -198),
+    }
 
     local function getRubbleBehindCFrame(rubble, areaName)
         if not rubble
@@ -2132,6 +2646,27 @@
             outsidePosition.Z
         )
 
+        -- ตรวจว่าเป็นแผนที่ตำแหน่งเดียวกับที่ผู้ใช้ทดสอบ
+        local firstBorder = MapFolder
+            and MapFolder:FindFirstChild("Border1")
+
+        local firstBlocker = firstBorder
+            and firstBorder:FindFirstChild("Blocker")
+
+        local matchesTestedMap = firstBlocker
+            and firstBlocker:IsA("BasePart")
+            and (
+                firstBlocker.Position
+                - Vector3.new(-14.9699593, 26.0142117, 117.136414)
+            ).Magnitude < 0.1
+
+        local frontPosition =
+            RuntimeFix.RubbleFrontPositions[tostring(areaName)]
+
+        if matchesTestedMap and frontPosition then
+            standPosition = frontPosition
+        end
+
         local rubbleBar = blocker:FindFirstChild("RubbleBar")
         local aimY = blocker.Position.Y
 
@@ -2169,17 +2704,31 @@
         return aimPosition
     end
 
+    function RuntimeFix.isRubbleBroken(rubble)
+        if not rubble or not rubble.Parent then
+            return true
+        end
+
+        local health =
+            tonumber(rubble.Parent:GetAttribute("RubbleHealth"))
+
+        -- ถ้าข้อมูลยังไม่มา ไม่ถือว่าพัง
+        return health ~= nil and health <= 0
+    end
+
     local function startRubbleHover(rubble, areaName)
         local character = getCharacter()
         local root = getCharacterRoot()
         local humanoid = getHumanoid()
 
         if AutoFarmSession.Cancelled
+            or not AutoFarmEnabled
             or not character
             or not root
             or not root.Parent
             or not humanoid
             or humanoid.Health <= 0
+            or RuntimeFix.isRubbleBroken(rubble)
         then
             return false
         end
@@ -2193,58 +2742,126 @@
         end
 
         stopHover()
+
+        local UPDATE_INTERVAL = 0.1
+        local MAX_DRIFT = 3
+        local HEIGHT_STRENGTH = 16
+        local HEIGHT_DAMPING = 8
+
+        root.Anchored = false
         humanoid.AutoRotate = false
 
-        -- Preserve the offset between HRP and Model pivot
-        local pivotOffset =
-            root.CFrame:ToObjectSpace(character:GetPivot())
+        local targetPosition = targetCFrame.Position
 
-        character:PivotTo(targetCFrame * pivotOffset)
+        local arrived = RuntimeFix.tweenRootTo(
+            targetCFrame,
+            function()
+                return RubbleModeActive
+                    and not RuntimeFix.isRubbleBroken(rubble)
+            end
+        )
+
+        if not arrived then
+            return false
+        end
 
         root.AssemblyLinearVelocity = Vector3.zero
         root.AssemblyAngularVelocity = Vector3.zero
 
-        local connection
+        local attachment = Instance.new("Attachment")
+        attachment.Name = "AutoRubbleFloatAttachment"
+        attachment.Parent = root
 
-        connection = RunService.Heartbeat:Connect(function()
-            if HoverConnection ~= connection then
-                connection:Disconnect()
-                return
-            end
+        local force = Instance.new("VectorForce")
+        force.Name = "AutoRubbleFloatForce"
+        force.Attachment0 = attachment
+        force.RelativeTo = Enum.ActuatorRelativeTo.World
+        force.ApplyAtCenterOfMass = true
+        force.Parent = root
 
-            if AutoFarmSession.Cancelled
-                or not AutoFarmEnabled
-                or getCharacter() ~= character
-                or not root.Parent
-                or not humanoid.Parent
-                or humanoid.Health <= 0
-                or not rubble.Parent
-            then
+        RuntimeFix.RubbleFloatAttachment = attachment
+        RuntimeFix.RubbleFloatForce = force
+
+        local token = {}
+        RuntimeFix.RubbleRepeatToken = token
+
+        task.spawn(function()
+            local ok, err = pcall(function()
+                while RuntimeFix.RubbleRepeatToken == token
+                    and not AutoFarmSession.Cancelled
+                    and AutoFarmEnabled
+                    and RubbleModeActive
+                    and not RuntimeFix.EndRoundPaused
+                    and getCharacter() == character
+                    and character.Parent
+                    and root.Parent
+                    and humanoid.Parent
+                    and humanoid.Health > 0
+                    and force.Parent
+                    and attachment.Parent
+                    and not RuntimeFix.isRubbleBroken(rubble)
+                do
+                    local mass = root.AssemblyMass
+
+                    if root.Anchored
+                        or mass <= 0
+                        or mass == math.huge
+                    then
+                        error("Character assembly is anchored or has invalid mass")
+                    end
+
+                    -- พยุงเฉพาะแนวตั้ง พร้อมลดการแกว่ง
+                    local heightError =
+                        targetPosition.Y - root.Position.Y
+
+                    local verticalSpeed =
+                        root.AssemblyLinearVelocity.Y
+
+                    local correction = math.clamp(
+                        heightError * HEIGHT_STRENGTH
+                            - verticalSpeed * HEIGHT_DAMPING,
+                        -workspace.Gravity,
+                        workspace.Gravity
+                    )
+
+                    force.Force = Vector3.new(
+                        0,
+                        mass * (workspace.Gravity + correction),
+                        0
+                    )
+
+                    -- ไม่วาร์ปซ้ำถ้ายังอยู่ใกล้จุดตี
+                    if (root.Position - targetPosition).Magnitude > MAX_DRIFT then
+                        local returned = RuntimeFix.tweenRootTo(
+                            targetCFrame,
+                            function()
+                                return RuntimeFix.RubbleRepeatToken == token
+                                    and RubbleModeActive
+                                    and not RuntimeFix.isRubbleBroken(rubble)
+                            end
+                        )
+
+                        if not returned then
+                            break
+                        end
+                    end
+
+                    task.wait(UPDATE_INTERVAL)
+                end
+            end)
+
+            -- Cleanup เฉพาะลูปที่ยังเป็นเจ้าของงาน
+            if RuntimeFix.RubbleRepeatToken == token then
                 stopHover()
-                return
             end
 
-            local currentCFrame =
-                getRubbleBehindCFrame(rubble, areaName)
-
-            if not currentCFrame then
-                stopHover()
-                return
+            if not ok then
+                warn("[AutoFarm] Rubble float failed:", err)
             end
-
-            -- Maintain Behind position and face the blocker
-            character:PivotTo(currentCFrame * pivotOffset)
-
-            root.AssemblyLinearVelocity = Vector3.zero
-            root.AssemblyAngularVelocity = Vector3.zero
         end)
 
-        HoverConnection = connection
-
         print(
-            "[AutoFarm] Rubble FRONT Start ->",
-            rubble:GetFullName(),
-            "| Area:",
+            "[AutoFarm] Rubble smooth float started | Area:",
             tostring(areaName)
         )
 
@@ -3060,8 +3677,9 @@
     end
 
     local function resetRubbleState()
-        RubbleModeActive = false
+        RuntimeFix.RubbleRepeatToken = nil
 
+        RubbleModeActive = false
         CurrentRubble = nil
         CurrentRubbleArea = nil
         RubbleTeleported = false
@@ -4191,20 +4809,18 @@
     RuntimeFix.StartNowRoom = nil
 
     function RuntimeFix.tryStartQueueNow()
-        if not AZEnabled("Lobby", "AutoJoin") then
+        if AutoFarmSession.Cancelled
+            or game.PlaceId ~= AUTO_JOIN_PLACE_ID
+            or not AZEnabled("Lobby", "AutoJoin")
+            or not RuntimeFix.QueueListenerStarted
+        then
             return false
         end
 
         if AZEnabled("Lobby", "ClaimBeforeJoin")
             and AZEnabled("Rewards", "AutoClaim")
             and not RuntimeFix.AutoClaimInitialReady
-        then
-            return false
-        end
-
-        if AutoFarmSession.Cancelled
-            or game.PlaceId ~= AUTO_JOIN_PLACE_ID
-            or not RuntimeFix.QueueListenerStarted
+            and not RuntimeFix.AutoClaimJoinReleased
         then
             return false
         end
@@ -4218,12 +4834,8 @@
             return false
         end
 
-        -- หยุดส่งทันทีเมื่อเริ่ม Teleport
-        if status ~= "inQuque" then
-            return false
-        end
-
-        if LocalPlayer:GetAttribute("QueueLeader") ~= true
+        if status ~= "inQuque"
+            or LocalPlayer:GetAttribute("QueueLeader") ~= true
             or not ActiveLobbyQueue
             or RuntimeFix.JoinOwner
             or RuntimeFix.PreparingTeam
@@ -4233,22 +4845,9 @@
             return false
         end
 
-        -- คิวที่หมดเวลาให้ระบบ retry เดิมจัดการ
         if LastLobbyJoinAttemptClock <= 0
-            or os.clock() - LastLobbyJoinAttemptClock >= LOBBY_JOIN_TIMEOUT_SECONDS
-        then
-            return false
-        end
-
-        local animation = PlayerGui:FindFirstChild("UI Animation (Finished)")
-        local queueGui = animation and animation:FindFirstChild("Quque")
-        local button = queueGui and queueGui:FindFirstChild("StartNow")
-
-        if not button
-            or not button:IsA("GuiButton")
-            or not button.Visible
-            or not button.Active
-            or not button.Interactable
+            or os.clock() - LastLobbyJoinAttemptClock
+                >= LOBBY_JOIN_TIMEOUT_SECONDS
         then
             return false
         end
@@ -4259,27 +4858,24 @@
         end
 
         local now = os.clock()
-        local previousSentAt = RuntimeFix.StartNowLastSentAt
+        local lastSent = RuntimeFix.StartNowLastSentAt
 
-        if previousSentAt and now - previousSentAt < RuntimeFix.StartNowRetrySeconds then
+        if lastSent
+            and now - lastSent < RuntimeFix.StartNowRetrySeconds
+        then
             return false
         end
 
-        local packets = RuntimeFix.getPackets()
-        local packet = packets.startQuqueNow
+        local packet = RuntimeFix.getPackets().startQuqueNow
 
         if not packet or type(packet.fire) ~= "function" then
             error("startQuqueNow packet unavailable")
         end
 
-        -- บันทึกก่อนส่ง เพื่อจำกัดความถี่แม้ fire เกิด error
         RuntimeFix.StartNowLastSentAt = now
         packet:fire()
 
-        if not previousSentAt then
-            print("[AutoStart] Start Now requested | Room:", room)
-        end
-
+        print("[AutoStart] Start requested | Room:", room)
         return true
     end
 
@@ -4379,7 +4975,7 @@
 
             LastLobbyJoinAttemptClock = os.clock()
 
-            packets.createQuque:fire({
+            RuntimeFix.createQueue({
                 gamemode = "Raid",
                 map = "ShadowGate",
                 chapter = 0,
@@ -4495,7 +5091,7 @@
                     )
                 end
 
-                packets.createQuque:fire({
+                RuntimeFix.createQueue({
                     gamemode = "Story",
 
                     map = stage.map,
@@ -4725,7 +5321,9 @@
     --==================================================
 
     local function cycleNextRoomNumber(): number
-        CurrentLobbyRoomNumber = (CurrentLobbyRoomNumber % 5) + 1
+        CurrentLobbyRoomNumber =
+            (CurrentLobbyRoomNumber % 6) + 1
+
         return CurrentLobbyRoomNumber
     end
 
@@ -5415,7 +6013,7 @@
 
         local isStory = target.Map == "hxh"
 
-        packet:fire({
+        RuntimeFix.createQueue({
             gamemode = isStory and "Story" or "Raid",
             map = isStory and "Hxh" or "ShadowGate",
             chapter = isStory and target.Chapter or 0,
@@ -5665,7 +6263,7 @@
         LastLobbyJoinAttemptClock = os.clock()
         LastLobbyJoinAction = RuntimeFix.runMonarch
 
-        packets.createQuque:fire({
+        RuntimeFix.createQueue({
             gamemode = needStory and "Story" or "Raid",
             map = needStory and "Hxh" or "ShadowGate",
             chapter = needStory and 1 or 0,
@@ -6125,7 +6723,7 @@
             queueScriptOnTeleport()
             task.wait(0.15)
 
-            packets.createQuque:fire({
+            RuntimeFix.createQueue({
                 gamemode = "Story",
                 map = bestMap,
                 chapter = 1,
@@ -6511,8 +7109,29 @@
 
                 if status == "Break the rubble to continue!" then
                     local areaName =
-                        CurrentAreaName
-                        or getCurrentArea()
+                        CurrentAreaName or getCurrentArea()
+
+                    local rubble = CurrentRubble
+
+                    if areaName and (
+                        not rubble
+                        or not rubble.Parent
+                        or tostring(CurrentRubbleArea) ~= tostring(areaName)
+                    ) then
+                        rubble = getRubbleForArea(areaName)
+                    end
+
+                    -- HP หมดแล้ว ห้ามเริ่มลูปใหม่แม้ข้อความ HUD ยังไม่เปลี่ยน
+                    if rubble and RuntimeFix.isRubbleBroken(rubble) then
+                        if RubbleModeActive or RuntimeFix.RubbleRepeatToken then
+                            stopHover()
+                            resetRubbleState()
+                            print("[AutoFarm] Rubble destroyed -> repeat stopped")
+                        end
+
+                        task.wait(RUBBLE_ATTACK_DELAY)
+                        continue
+                    end
 
                     if areaName then
                         handleRubbleStatus(areaName)
@@ -6520,6 +7139,7 @@
 
                     if CurrentRubble
                         and CurrentRubble.Parent
+                        and not RuntimeFix.isRubbleBroken(CurrentRubble)
                     then
                         local rubblePosition =
                             getRubbleAttackPosition(
@@ -6527,13 +7147,19 @@
                                 CurrentRubbleArea
                             )
 
-                        useReadySkills(
-                            rubblePosition
-                        )
+                        useReadySkills(rubblePosition)
                     end
 
                     task.wait(RUBBLE_ATTACK_DELAY)
                     continue
+                end
+
+                -- HUD ออกจากสถานะ Rubble แล้ว หยุดก่อนเข้าระบบตีมอน
+                -- ไม่ต้องรอให้หมายเลข Area เปลี่ยน
+                if RubbleModeActive or RuntimeFix.RubbleRepeatToken then
+                    stopHover()
+                    resetRubbleState()
+                    print("[AutoFarm] Rubble mode ended -> enemy farm resumed")
                 end
 
                 local areaName = getAreaFromStatus(status)
@@ -7757,7 +8383,7 @@
                 print(string.format("[AutoEvoHutao] Joining Spirited Away Raid (BathTub) | Room %d...", CurrentLobbyRoomNumber))
                 ActiveLobbyQueue = "Raid"
 
-                packets.createQuque:fire({
+                RuntimeFix.createQueue({
                     gamemode = "Raid",
                     map = "BathTub",
                     chapter = 1,
@@ -7770,7 +8396,7 @@
                 print(string.format("[AutoEvoHutao] Joining Story Hxh Chapter 1 (Nightmare) | Room %d...", CurrentLobbyRoomNumber))
                 ActiveLobbyQueue = "Story_Hxh_Nightmare"
 
-                packets.createQuque:fire({
+                RuntimeFix.createQueue({
                     gamemode = "Story",
                     map = "Hxh",
                     chapter = 1,
@@ -7783,7 +8409,7 @@
                 print(string.format("[AutoEvoHutao] Joining Story Hxh Chapter 3 | Room %d...", CurrentLobbyRoomNumber))
                 ActiveLobbyQueue = "Story_Hxh_Chapter3"
 
-                packets.createQuque:fire({
+                RuntimeFix.createQueue({
                     gamemode = "Story",
                     map = "Hxh",
                     chapter = 3,
@@ -7808,6 +8434,7 @@
 
     function StartAutoRedeemUnusedCodes()
         if AutoRedeemCodesEnabled
+            or AutoFarmSession.Cancelled
             or game.PlaceId ~= AUTO_JOIN_PLACE_ID
         then
             return
@@ -7816,364 +8443,208 @@
         AutoRedeemCodesEnabled = true
 
         task.spawn(function()
-            local packets
-            local accountNamespace
-            local codesConfig
+            local RESULT_TIMEOUT = 4
+            local REQUEST_INTERVAL = 1
 
-            --==========================================
-            -- Load modules
-            --==========================================
+            -- โค้ดจากรายงาน UpdateLog และรายการที่ผู้ใช้ส่งไว้
+            local codes = {
+                "TYASHIRA",
+                "TYFRIGID",
+                "NEWRAID",
+                "SORRYFORDELAY",
+                "UPDATESOONWEPROMISE",
+                "SORRYFORZEDELAY",
+                "UPDATETWO",
+                "ARISE67",
+                "SORRY4DELAY",
+                "UPDATE3LEGACY",
+                "3TIMESACHARM",
 
-            local modulesLoaded, moduleError =
-                pcall(function()
-                    packets =
-                        require(
-                            ReplicatedStorage
-                                :WaitForChild("lobby")
-                                :WaitForChild("packets")
-                        )
+                "SERVERLIVE67",
+                "BENICE2ME",
+                "BACKUPSTRONGER",
+                "LAPASSION",
+                "1MVISITS",
+                "SIXSEVEN",
+                "LESSLAG",
+                "BIGTYPO",
+                "PATCHNOTE67",
+                "SORRYXD67",
+                "AZISOUT",
+                "LETSGO",
+                "HOP3YOU3NJOY",
+                "PATCH1",
+                "PATCH2",
+                "RELEASE",
+            }
 
-                    accountNamespace =
-                        require(
-                            ReplicatedStorage
-                                :WaitForChild("global")
-                                :WaitForChild("stores")
-                                :WaitForChild("accountNamespace")
-                        )
+            -- ค่าที่ผู้ใช้เคยระบุ ไม่ใช่ Config ปัจจุบันของเกม
+            -- ไม่ใส่ค่าให้โค้ดที่ยังไม่ทราบขั้นต่ำ
+            local minimumLevels = {
+                SORRYFORDELAY = 25,
+                NEWRAID = 50,
+            }
 
-                    codesConfig =
-                        require(
-                            ReplicatedStorage
-                                :WaitForChild("assets")
-                                :WaitForChild("config")
-                                :WaitForChild("codesConfig")
-                        )
-                end)
+            local confirmedCount = 0
+            local skippedCount = 0
+            local unconfirmedCount = 0
 
-            if not modulesLoaded then
-                AutoRedeemCodesEnabled = false
-
-                warn(
-                    "[AutoRedeem] Failed to load modules:",
-                    moduleError
-                )
-
-                return
+            local function canContinue()
+                return not AutoFarmSession.Cancelled
+                    and game.PlaceId == AUTO_JOIN_PLACE_ID
             end
 
-            --==========================================
-            -- Validate packet
-            --==========================================
+            local function readData()
+                local data = RuntimeFix.readAccount()
 
-            if not packets
-                or not packets.redeemCode
-                or type(packets.redeemCode.fire) ~= "function"
-            then
-                AutoRedeemCodesEnabled = false
-
-                warn(
-                    "[AutoRedeem] redeemCode packet API is unavailable."
-                )
-
-                return
-            end
-
-            if type(codesConfig) ~= "table" then
-                AutoRedeemCodesEnabled = false
-
-                warn(
-                    "[AutoRedeem] codesConfig is not a table."
-                )
-
-                return
-            end
-
-            --==========================================
-            -- Account
-            --==========================================
-
-            local function getAccountData()
-                local success, data =
-                    pcall(function()
-                        local account =
-                            accountNamespace
-                                .getLocalPlayerAccount()
-
-                        if not account then
-                            error(
-                                "LocalPlayer account is unavailable."
-                            )
-                        end
-
-                        return account:toTable()
-                    end)
-
-                if not success then
-                    return nil, tostring(data)
-                end
-
-                if type(data) ~= "table" then
-                    return nil,
-                        "Account data is not a table."
+                if type(data) ~= "table"
+                    or type(data.cdk) ~= "table"
+                then
+                    error("Account/cdk unavailable")
                 end
 
                 return data
             end
 
-            --==========================================
-            -- Redeemed Code Set
-            --==========================================
-
-            local function makeRedeemedSet(data)
-                local redeemed = {}
-
-                if type(data) ~= "table"
-                    or type(data.cdk) ~= "table"
-                then
-                    return redeemed
-                end
-
-                for _, value in pairs(data.cdk) do
-                    local normalized =
-                        string.lower(
-                            tostring(value)
-                        ):gsub("%s+", "")
-
-                    if normalized ~= "" then
-                        redeemed[normalized] = true
-                    end
-                end
-
-                return redeemed
+            local function isClaimed(data, code)
+                return table.find(
+                    data.cdk,
+                    string.lower(code)
+                ) ~= nil
             end
 
-            --==========================================
-            -- Build Code List
-            --==========================================
+            local ok, runError = pcall(function()
+                local packets = RuntimeFix.getPackets()
+                local packet = packets and packets.redeemCode
 
-            local codeList = {}
-
-            for configKey, entry in pairs(codesConfig) do
-                if type(entry) == "table"
-                    and type(entry.Code) == "string"
-                then
-                    table.insert(
-                        codeList,
-                        {
-                            code = entry.Code,
-                            minimumLevel =
-                                tonumber(
-                                    entry.MinimumLevel
-                                ) or 0,
-                            configKey =
-                                tostring(configKey),
-                        }
-                    )
-                end
-            end
-
-            table.sort(
-                codeList,
-                function(a, b)
-                    return string.lower(a.code)
-                        < string.lower(b.code)
-                end
-            )
-
-            print(
-                "[AutoRedeem] START | Config Codes:",
-                #codeList
-            )
-
-            --==========================================
-            -- Initial Account Check
-            --==========================================
-
-            local initialData, initialError =
-                getAccountData()
-
-            if not initialData then
-                AutoRedeemCodesEnabled = false
-
-                warn(
-                    "[AutoRedeem] Initial account read failed:",
-                    initialError
-                )
-
-                return
-            end
-
-            local playerLevel, levelError =
-                RuntimeFix.getAccountLevel(initialData)
-
-            if playerLevel == nil then
-                AutoRedeemCodesEnabled = false
-
-                warn(
-                    "[AutoRedeem] Cannot calculate player level:",
-                    levelError
-                )
-
-                return
-            end
-
-            print(
-                "[AutoRedeem] Player Level:",
-                playerLevel
-            )
-
-            --==========================================
-            -- Redeem Codes
-            --==========================================
-
-            for _, codeInfo in ipairs(codeList) do
-                if AutoFarmSession.Cancelled then
-                    break
+                if not packet or type(packet.fire) ~= "function" then
+                    error("redeemCode packet unavailable")
                 end
 
-                local code =
-                    tostring(codeInfo.code)
+                local seen = {}
 
-                local normalizedCode =
-                    string.lower(code):gsub("%s+", "")
+                print("[AutoRedeem] START | Codes:", #codes)
 
-                ------------------------------------------
-                -- Refresh account data
-                ------------------------------------------
-
-                local data, accountError =
-                    getAccountData()
-
-                if not data then
-                    warn(
-                        "[AutoRedeem] Account read failed:",
-                        accountError
-                    )
-
-                    task.wait(1)
-                    continue
-                end
-
-                ------------------------------------------
-                -- Check already redeemed
-                ------------------------------------------
-
-                local redeemed =
-                    makeRedeemedSet(data)
-
-                if redeemed[normalizedCode] then
-                    print(
-                        "[AutoRedeem] Already redeemed ->",
-                        code
-                    )
-
-                    continue
-                end
-
-                ------------------------------------------
-                -- Check Minimum Level
-                ------------------------------------------
-
-                if playerLevel < codeInfo.minimumLevel then
-                    print(
-                        "[AutoRedeem] Skip ->",
-                        code,
-                        "| Required Level:",
-                        codeInfo.minimumLevel,
-                        "| Current Level:",
-                        playerLevel
-                    )
-
-                    continue
-                end
-
-                ------------------------------------------
-                -- Send Redeem Request
-                ------------------------------------------
-
-                print(
-                    "[AutoRedeem] Sending ->",
-                    code
-                )
-
-                local fireOk, fireError =
-                    pcall(function()
-                        packets.redeemCode:fire(
-                            code
-                        )
-                    end)
-
-                if not fireOk then
-                    warn(
-                        "[AutoRedeem] Request failed ->",
-                        code,
-                        "|",
-                        fireError
-                    )
-
-                    task.wait(1)
-                    continue
-                end
-
-                print(
-                    "[AutoRedeem] Request sent ->",
-                    code
-                )
-
-                ------------------------------------------
-                -- Verify from Account
-                ------------------------------------------
-
-                local verified = false
-                local deadline =
-                    os.clock() + 5
-
-                repeat
-                    if AutoFarmSession.Cancelled then
+                for _, rawCode in ipairs(codes) do
+                    if not canContinue() then
                         break
                     end
 
-                    task.wait(0.25)
+                    local code = rawCode:match("^%s*(.-)%s*$")
+                    local normalized = string.lower(code)
 
-                    local latestData =
-                        getAccountData()
+                    if code == "" or #code > 64 then
+                        warn("[AutoRedeem] Invalid format:", rawCode)
+                        continue
+                    end
 
-                    if latestData then
-                        local latestRedeemed =
-                            makeRedeemedSet(
-                                latestData
+                    if seen[normalized] then
+                        continue
+                    end
+
+                    seen[normalized] = true
+
+                    local data = readData()
+
+                    if isClaimed(data, code) then
+                        skippedCount += 1
+                        print("[AutoRedeem] Already claimed:", code)
+                        continue
+                    end
+
+                    local minimumLevel = minimumLevels[code]
+
+                    if minimumLevel then
+                        local level, levelError =
+                            RuntimeFix.getAccountLevel(data)
+
+                        if level == nil then
+                            error(
+                                "Cannot check code level: "
+                                .. tostring(levelError)
                             )
+                        end
 
-                        if latestRedeemed[
-                            normalizedCode
-                        ]
-                        then
-                            verified = true
-                            break
+                        if level < minimumLevel then
+                            skippedCount += 1
+
+                            print(
+                                "[AutoRedeem] Level insufficient:",
+                                code,
+                                "| Current:", level,
+                                "| Required:", minimumLevel
+                            )
+                            continue
                         end
                     end
-                until os.clock() >= deadline
 
-                if verified then
-                    print(
-                        "[AutoRedeem] SUCCESS ->",
-                        code
-                    )
-                else
-                    warn(
-                        "[AutoRedeem] Not verified ->",
-                        code,
-                        "| Server may have rejected, expired, or normalized this code differently."
-                    )
+                    local fireOk, fireError = pcall(function()
+                        packet:fire(code)
+                    end)
+
+                    if not fireOk then
+                        unconfirmedCount += 1
+
+                        warn(
+                            "[AutoRedeem] Request failed:",
+                            code,
+                            fireError
+                        )
+                    else
+                        print("[AutoRedeem] Request sent:", code)
+
+                        local confirmed = false
+                        local deadline = os.clock() + RESULT_TIMEOUT
+
+                        repeat
+                            if not canContinue() then
+                                break
+                            end
+
+                            local latest = readData()
+
+                            if isClaimed(latest, code) then
+                                confirmed = true
+                                break
+                            end
+
+                            task.wait(0.2)
+                        until os.clock() >= deadline
+
+                        if confirmed then
+                            confirmedCount += 1
+                            print("[AutoRedeem] CONFIRMED:", code)
+                        elseif canContinue() then
+                            unconfirmedCount += 1
+
+                            warn(
+                                "[AutoRedeem] NOT CONFIRMED:",
+                                code,
+                                "| No cdk confirmation within",
+                                RESULT_TIMEOUT,
+                                "seconds"
+                            )
+                        end
+                    end
+
+                    if canContinue() then
+                        task.wait(REQUEST_INTERVAL)
+                    end
                 end
+            end)
 
-                task.wait(0.75)
-            end
-
+            -- ปลดระบบที่รอต่อ แม้เกิด error
             AutoRedeemCodesEnabled = false
 
+            if not ok then
+                warn("[AutoRedeem] Stopped:", runError)
+            end
+
             print(
-                "[AutoRedeem] FINISHED"
+                "[AutoRedeem] FINISHED",
+                "| Confirmed:", confirmedCount,
+                "| Skipped:", skippedCount,
+                "| Unconfirmed:", unconfirmedCount
             )
         end)
     end
@@ -9396,35 +9867,16 @@
         task.wait(0.15)
 
         local ok, err = pcall(function()
-            local lobbyFolder = ReplicatedStorage:FindFirstChild("lobby")
-            local packetFolder = lobbyFolder and lobbyFolder:FindFirstChild("packets")
-            if packetFolder then
-                local packets = require(packetFolder)
-                if packets.createQuque and type(packets.createQuque.fire) == "function" then
-                    packets.createQuque:fire({
-                        gamemode = "Raid",
-                        map = "BathTub",
-                        chapter = 1,
-                        difficulty = 4,
-                        maxPlayers = 4,
-                        friendsOnly = false,
-                        roomNumber = CurrentLobbyRoomNumber
-                    })
-                    return
-                end
-            end
-
-            local fallbackEvent = ReplicatedStorage:FindFirstChild("CreateQuque")
-            if fallbackEvent and fallbackEvent:IsA("RemoteEvent") then
-                local fallbackBytes = { 2, 1, 66, 97, 116, 104, 84, 117, 98, 7, 82, 97, 105, 100, 4, 0, 4, 0 }
-                local packetBuffer = buffer.create(#fallbackBytes)
-                for byteIndex, byteValue in ipairs(fallbackBytes) do
-                    buffer.writeu8(packetBuffer, byteIndex - 1, byteValue)
-                end
-                fallbackEvent:FireServer(packetBuffer)
-            else
-                error("No valid CreateQuque channel available.")
-            end
+            RuntimeFix.createQueue({
+                gamemode = "Raid",
+                map = "BathTub",
+                chapter = 0,
+                floor = 0,
+                difficulty = 4,
+                maxPlayers = 4,
+                friendsOnly = false,
+                roomNumber = CurrentLobbyRoomNumber,
+            })
         end)
 
         if not ok then
@@ -12454,7 +12906,7 @@
                 LastLobbyJoinAttemptClock = os.clock()
 
                 local ok, err = pcall(function()
-                    packets.createQuque:fire({
+                    RuntimeFix.createQueue({
                         gamemode = "Story",
                         map = "Hxh",
                         chapter = 1,
@@ -12658,7 +13110,7 @@
         LastLobbyJoinAction = autoJoinBestAvailableStory
         LastLobbyJoinAttemptClock = os.clock()
 
-        packets.createQuque:fire({
+        RuntimeFix.createQueue({
             gamemode = gamemode,
             map = map,
             chapter = chapter,
@@ -13253,6 +13705,7 @@
             if AZEnabled("Lobby", "ClaimBeforeJoin")
                 and AZEnabled("Rewards", "AutoClaim")
                 and not RuntimeFix.AutoClaimInitialReady
+                and not RuntimeFix.AutoClaimJoinReleased
             then
                 return false
             end
@@ -13324,8 +13777,164 @@
     joinShadowGateRaid =
         RuntimeFix.guardJoin(joinShadowGateRaid)
 
+    function RuntimeFix.startAutoStageVote()
+        if RuntimeFix.StageVoteStarted
+            or AutoFarmSession.Cancelled
+            or game.PlaceId ~= AUTO_LEAVE_PLACE_ID
+        then
+            return
+        end
+
+        RuntimeFix.StageVoteStarted = true
+
+        task.spawn(function()
+            local POLL_INTERVAL = 0.25
+            local RETRY_INTERVAL = 3
+
+            local runStore = nil
+            local nextModuleAttempt = 0
+            local nextSendAttempt = 0
+            local lastWarningAt = -math.huge
+            local lastStatus = nil
+
+            local roundKey = nil
+            local confirmed = false
+            local attempts = 0
+
+            print("[AutoStageStart] Watcher started")
+
+            while not AutoFarmSession.Cancelled
+                and game.PlaceId == AUTO_LEAVE_PLACE_ID
+            do
+                local ok, err = pcall(function()
+                    if not runStore then
+                        if os.clock() < nextModuleAttempt then
+                            return
+                        end
+
+                        nextModuleAttempt = os.clock() + 1
+
+                        local loaded = RuntimeFix.requireModule(
+                            ReplicatedStorage,
+                            {"game", "stores", "runStore"}
+                        )
+
+                        local state = loaded
+                            and loaded.store
+                            and loaded.store.state
+
+                        if not state
+                            or not state.status
+                            or type(state.status.get) ~= "function"
+                        then
+                            error("runStore.state.status unavailable")
+                        end
+
+                        runStore = loaded
+                    end
+
+                    local status = runStore.store.state.status:get()
+                    local voteEndsAt =
+                        workspace:GetAttribute("StartVoteEndsAt")
+
+                    local hasVoted =
+                        LocalPlayer:GetAttribute("StartVoted") == true
+
+                    if status ~= lastStatus then
+                        lastStatus = status
+                        print("[AutoStageStart] Status:", status)
+                    end
+
+                    -- ใช้เวลาปิดโหวตเป็นตัวระบุรอบ
+                    if type(voteEndsAt) == "number"
+                        and voteEndsAt ~= roundKey
+                    then
+                        roundKey = voteEndsAt
+                        confirmed = false
+                        attempts = 0
+                        nextSendAttempt = 0
+
+                        print(
+                            "[AutoStageStart] New vote round:",
+                            roundKey
+                        )
+                    end
+
+                    -- ถือว่าสำเร็จเมื่อ Server ยืนยันเท่านั้น
+                    if hasVoted then
+                        if not confirmed then
+                            confirmed = true
+
+                            print(
+                                "[AutoStageStart] Vote CONFIRMED",
+                                "| Votes:",
+                                workspace:GetAttribute("StartVotes"),
+                                "/",
+                                workspace:GetAttribute("StartVoters")
+                            )
+                        end
+
+                        return
+                    end
+
+                    confirmed = false
+
+                    if status ~= "waiting"
+                        or type(voteEndsAt) ~= "number"
+                    then
+                        return
+                    end
+
+                    -- ไม่ส่งเมื่อหมดช่วงโหวตแล้ว
+                    if voteEndsAt <= workspace:GetServerTimeNow() then
+                        return
+                    end
+
+                    if os.clock() < nextSendAttempt then
+                        return
+                    end
+
+                    local remote =
+                        ReplicatedStorage:FindFirstChild("startVote")
+
+                    if not remote or not remote:IsA("RemoteEvent") then
+                        error("ReplicatedStorage.startVote unavailable")
+                    end
+
+                    if AutoFarmSession.Cancelled then
+                        return
+                    end
+
+                    -- จำกัดความถี่ แม้ FireServer เกิด error
+                    nextSendAttempt = os.clock() + RETRY_INTERVAL
+                    attempts += 1
+
+                    remote:FireServer(nil)
+
+                    print(
+                        "[AutoStageStart] Vote requested",
+                        "| Attempt:", attempts,
+                        "| Round:", roundKey
+                    )
+                end)
+
+                if not ok
+                    and os.clock() - lastWarningAt >= 5
+                then
+                    lastWarningAt = os.clock()
+                    warn("[AutoStageStart] Error:", err)
+                end
+
+                task.wait(POLL_INTERVAL)
+            end
+
+            RuntimeFix.StageVoteStarted = false
+        end)
+    end
+
     task.spawn(function()
         startAutoLeaveAfterMatch()
+        RuntimeFix.startAutoStageVote()
 
         if AZEnabled("Performance", "FPSBoost") then
             if typeof(setfpscap) == "function" then
@@ -13362,10 +13971,24 @@
             then
                 print("[AZ Config] Waiting for rewards...")
 
+                local claimDeadline = os.clock() + 60
+
                 while not AutoFarmSession.Cancelled
                     and not RuntimeFix.AutoClaimInitialReady
+                    and os.clock() < claimDeadline
                 do
                     task.wait(0.25)
+                end
+
+                if not AutoFarmSession.Cancelled
+                    and not RuntimeFix.AutoClaimInitialReady
+                then
+                    RuntimeFix.AutoClaimJoinReleased = true
+
+                    warn(
+                        "[AutoJoin] Reward wait exceeded 60 seconds"
+                        .. " -> allowing Auto Join"
+                    )
                 end
             end
 
