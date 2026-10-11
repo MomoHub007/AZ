@@ -2234,6 +2234,8 @@
         end
 
         local TARGET_TWEEN_DISTANCE = 100
+        local useBathTween =
+            workspace:GetAttribute("Mode") == "spiritedawayraid"
 
         -- เก็บก่อน stopHover ล้าง CurrentTarget
         local changingTarget =
@@ -2303,11 +2305,16 @@
             enemyRoot.Position
         )
 
-        if changingTarget then
+        if changingTarget or useBathTween then
             -- ถ้ามอนเคลื่อนหนีไกลระหว่างทาง ให้คำนวณจุดใหม่
-            while (root.Position - enemyRoot.Position).Magnitude
-                > TARGET_TWEEN_DISTANCE
-            do
+            while (
+                useBathTween
+                and (root.Position - initialPosition).Magnitude > 3
+            ) or (
+                not useBathTween
+                and (root.Position - enemyRoot.Position).Magnitude
+                    > TARGET_TWEEN_DISTANCE
+            ) do
                 print(
                     "[AutoFarm] Target far -> Tween:",
                     enemy:GetFullName(),
@@ -2360,13 +2367,14 @@
             end
         end
 
-        -- อยู่ไม่เกิน 100 studs แล้ว จัดเข้าจุดตีทันที
-        local pivotOffset =
-            root.CFrame:ToObjectSpace(character:GetPivot())
+        if not useBathTween then
+            local pivotOffset =
+                root.CFrame:ToObjectSpace(character:GetPivot())
 
-        character:PivotTo(
-            CFrame.new(initialPosition) * initialFacing * pivotOffset
-        )
+            character:PivotTo(
+                CFrame.new(initialPosition) * initialFacing * pivotOffset
+            )
+        end
 
         humanoid.AutoRotate = false
 
@@ -3644,9 +3652,24 @@
         stopHover()
 
         local targetPosition = exitPosition + Vector3.new(0, 2, 0)
-        character:PivotTo(CFrame.new(targetPosition))
 
-        print("[AutoFarm] Teleport -> Exit", targetPosition)
+        if workspace:GetAttribute("Mode") == "spiritedawayraid" then
+            local arrived = RuntimeFix.tweenRootTo(
+                CFrame.new(targetPosition),
+                function()
+                    return workspace:GetAttribute("Mode")
+                        == "spiritedawayraid"
+                end
+            )
+
+            if not arrived then
+                return false
+            end
+
+            print("[AutoFarm] BathTub Tween -> Exit", targetPosition)
+        else
+            character:PivotTo(CFrame.new(targetPosition))
+        end
 
         return true
     end
@@ -3717,14 +3740,37 @@
                         -- ใช้พิกัดเดิมเฉพาะเมื่ออยู่ในแมพ
                         stopHover()
 
-                        character:PivotTo(
-                            CFrame.new(RAID_START_POSITION)
-                        )
+                        if workspace:GetAttribute("Mode") == "spiritedawayraid" then
+                            local arrived = RuntimeFix.tweenRootTo(
+                                CFrame.new(RAID_START_POSITION),
+                                function()
+                                    local raidStatus = string.lower(getRaidStatus())
 
-                        print(
-                            "[AutoFarm] Nightmare Start Teleport ->",
-                            RAID_START_POSITION
-                        )
+                                    return workspace:GetAttribute("Mode")
+                                        == "spiritedawayraid"
+                                        and string.find(
+                                            raidStatus,
+                                            "starting nightmare",
+                                            1,
+                                            true
+                                        ) ~= nil
+                                end
+                            )
+
+                            if arrived then
+                                print(
+                                    "[AutoFarm] BathTub Tween -> Nightmare Start",
+                                    RAID_START_POSITION
+                                )
+                            end
+                        else
+                            character:PivotTo(CFrame.new(RAID_START_POSITION))
+
+                            print(
+                                "[AutoFarm] Nightmare Start Teleport ->",
+                                RAID_START_POSITION
+                            )
+                        end
                     else
                         -- ป้องกันวาร์ปออกนอกด่าน เช่น Shadow Gate
                         print(
