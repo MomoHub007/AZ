@@ -7553,7 +7553,9 @@
     end
 
     function fireEvolveHutao(): boolean
-        if AutoFarmSession.Cancelled then
+        if AutoFarmSession.Cancelled
+            or game.PlaceId ~= AUTO_JOIN_PLACE_ID
+        then
             return false
         end
 
@@ -7562,24 +7564,69 @@
         end
 
         if HutaoEvolveTriggered
+            or RuntimeFix.PreparingTeam
+            or RuntimeFix.Crafting
+            or RuntimeFix.StoredPending
             or os.clock() < HutaoEvolveRetryAt
         then
             return false
         end
 
+        local status = getHutaoEvoStatus()
+
+        if not status or not status.isReady then
+            return false
+        end
+
         HutaoEvolveTriggered = true
+        RuntimeFix.PreparingTeam = true
 
         local ok, confirmed = pcall(function()
-            local packets = RuntimeFix.getPackets()
+            if not RuntimeFix.monarchClearQueue() then
+                warn("[AutoEvoHutao] Cannot clear lobby queue.")
+                return false
+            end
 
-            if not packets.evolveCharacter
-                or type(packets.evolveCharacter.fire) ~= "function"
+            -- gameSlot 1 คือ Active Character
+            -- helper เดิมตรวจทั้ง Slot1 และ data.character
+            if not RuntimeFix.equipPostMonarchActive("hutao") then
+                warn("[AutoEvoHutao] Hu Tao Active not confirmed.")
+                return false
+            end
+
+            -- การ Equip มีการรอ: ตรวจข้อมูลล่าสุดก่อนใช้ทรัพยากร
+            local fresh = RuntimeFix.readAccount()
+
+            if not fresh
+                or fresh.character ~= "hutao"
+                or AutoFarmSession.Cancelled
             then
+                return false
+            end
+
+            if isHutaoEvolved() then
+                return true
+            end
+
+            local freshStatus = getHutaoEvoStatus()
+
+            if not freshStatus or not freshStatus.isReady then
+                warn("[AutoEvoHutao] Resources changed; reevaluate farm.")
+                return false
+            end
+
+            local packets = RuntimeFix.getPackets()
+            local packet = packets.evolveCharacter
+
+            if not packet or type(packet.fire) ~= "function" then
                 error("evolveCharacter unavailable")
             end
 
-            packets.evolveCharacter:fire("hutao")
-            print("[AutoEvoHutao] Request sent -> Waiting for account")
+            packet:fire("hutao")
+
+            print(
+                "[AutoEvoHutao] Active confirmed -> Evo requested"
+            )
 
             local deadline = os.clock() + 10
 
@@ -7595,22 +7642,25 @@
                 task.wait(0.2)
             until os.clock() >= deadline
 
+            warn("[AutoEvoHutao] Account confirmation timed out.")
             return false
         end)
 
+        RuntimeFix.PreparingTeam = false
         HutaoEvolveTriggered = false
 
-        if not ok then
-            warn("[AutoEvoHutao] Request failed:", confirmed)
-        elseif confirmed then
-            print("[AutoEvoHutao] Evolution CONFIRMED")
+        if ok and confirmed then
             HutaoEvolveRetryAt = 0
+            print("[AutoEvoHutao] Evolution CONFIRMED")
             return true
-        else
-            warn("[AutoEvoHutao] Evolution not confirmed before timeout.")
         end
 
         HutaoEvolveRetryAt = os.clock() + 5
+
+        if not ok then
+            warn("[AutoEvoHutao] Action failed:", confirmed)
+        end
+
         return false
     end
 
