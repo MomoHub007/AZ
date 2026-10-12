@@ -14574,6 +14574,109 @@
         return true
     end
 
+    function RuntimeFix.traitKeepListCleared(data)
+        local settings = data and data.settings
+
+        -- ข้อมูลยังไม่พร้อม ไม่ถือว่าเคลียร์แล้ว
+        if type(settings) ~= "table" then
+            return false
+        end
+
+        for key, value in pairs(settings) do
+            if type(key) == "string"
+                and key:match("^SkipTrait%d+$")
+                and value == true
+            then
+                return false
+            end
+        end
+
+        return true
+    end
+
+    function RuntimeFix.clearTraitKeepList()
+        if AutoFarmSession.Cancelled
+            or game.PlaceId ~= AUTO_JOIN_PLACE_ID
+        then
+            return false
+        end
+
+        local data = RuntimeFix.readAccount()
+        local settings = data and data.settings
+
+        if type(settings) ~= "table" then
+            warn("[AutoTrait] Keep settings unavailable -> retry later")
+            return false
+        end
+
+        if RuntimeFix.traitKeepListCleared(data) then
+            return true
+        end
+
+        local globalPackets = RuntimeFix.requireModule(
+            ReplicatedStorage,
+            {"global", "packets"}
+        )
+
+        local packet = globalPackets and globalPackets.setBoolSetting
+
+        if not packet or type(packet.fire) ~= "function" then
+            error("global.packets.setBoolSetting unavailable")
+        end
+
+        local keys = {}
+
+        for key, value in pairs(settings) do
+            if type(key) == "string"
+                and key:match("^SkipTrait%d+$")
+                and value == true
+            then
+                table.insert(keys, key)
+            end
+        end
+
+        table.sort(keys)
+
+        print("[AutoTrait] Untick All -> clearing:", #keys)
+
+        for _, key in ipairs(keys) do
+            if AutoFarmSession.Cancelled
+                or game.PlaceId ~= AUTO_JOIN_PLACE_ID
+            then
+                return false
+            end
+
+            packet:fire({
+                id = key,
+                value = false,
+            })
+
+            task.wait(0.1)
+        end
+
+        local deadline = os.clock() + 5
+
+        repeat
+            if AutoFarmSession.Cancelled
+                or game.PlaceId ~= AUTO_JOIN_PLACE_ID
+            then
+                return false
+            end
+
+            if RuntimeFix.traitKeepListCleared(
+                RuntimeFix.readAccount()
+            ) then
+                print("[AutoTrait] Untick All confirmed -> roll allowed")
+                return true
+            end
+
+            task.wait(0.1)
+        until os.clock() >= deadline
+
+        warn("[AutoTrait] Untick All not confirmed -> roll paused")
+        return false
+    end
+
     function RuntimeFix.runAutoTraits()
         local state = RuntimeFix.AutoTrait
 
@@ -14635,6 +14738,12 @@
         state.Busy = true
 
         local ok, runError = pcall(function()
+            -- Busy ถูกตั้งไว้แล้ว จึงไม่มี AutoTrait งานอื่นเข้ามาซ้อน
+            if not RuntimeFix.clearTraitKeepList() then
+                state.RetryAt = os.clock() + 3
+                return
+            end
+
             local packets = RuntimeFix.getPackets()
 
             if not packets.rollTrait
@@ -14802,6 +14911,7 @@
                     local latest = RuntimeFix.readAccount()
 
                     if not latest
+                        or not RuntimeFix.traitKeepListCleared(latest)
                         or readTrait(latest, characterId) ~= traitId
                         or readBalance(latest) ~= balance
                         or not RuntimeFix.findOwnedSlot(latest, characterId)
