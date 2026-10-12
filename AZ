@@ -1494,7 +1494,10 @@
     end
 
     local function getAreaPart(areaName)
-        if not areaName then
+        if not areaName
+            or not AreasFolder
+            or not AreasFolder.Parent
+        then
             return nil
         end
 
@@ -1508,18 +1511,15 @@
             return nil
         end
 
+        -- Raid ที่มี Area Part เดียว:
+        -- คืน Instance จริง เพื่อให้ตรวจ Parent ได้
         local activeArea = getSingleAreaPart()
 
-        if not activeArea then
-            return nil
+        if activeArea and activeArea.Parent then
+            return activeArea
         end
 
-        return {
-            Name = tostring(areaName),
-            Position = activeArea.Position,
-            Size = activeArea.Size,
-            CFrame = activeArea.CFrame,
-        }
+        return nil
     end
 
     --==================================================
@@ -2118,6 +2118,8 @@
             CFrame.new(targetPosition),
             function()
                 return areaPart.Parent ~= nil
+                    and tostring(CurrentAreaName) == areaKey
+                    and not RuntimeFix.EndRoundPaused
                     and getNearestEnemyInArea(areaKey) == nil
             end
         )
