@@ -5186,7 +5186,7 @@
     local CurrentLobbyRoomNumber = 3
     local LastLobbyJoinAttemptClock = 0
     local LobbyRetryCount = 0
-    local LOBBY_JOIN_TIMEOUT_SECONDS = 15
+    local LOBBY_JOIN_TIMEOUT_SECONDS = 5
     local LastLobbyJoinAction = nil
     local ActiveLobbyQueue = nil
 
@@ -14338,6 +14338,84 @@
 
                 if AutoFarmSession.Cancelled then
                     break
+                end
+
+                -- กู้คำขอคิวที่หมดเวลาก่อนแยกเส้นทาง progression
+                local queueTimedOut =
+                    ActiveLobbyQueue ~= nil
+                    and LastLobbyJoinAttemptClock > 0
+                    and os.clock() - LastLobbyJoinAttemptClock
+                        >= LOBBY_JOIN_TIMEOUT_SECONDS
+
+                local canRecover =
+                    AZEnabled("Lobby", "AutoJoin")
+                    and RuntimeFix.JoinOwner == nil
+                    and not RuntimeFix.Monarch.Busy
+                    and not RuntimeFix.PreparingTeam
+                    and not RuntimeFix.Crafting
+                    and not RuntimeFix.StoredPending
+
+                if queueTimedOut and canRecover then
+                    local previousRoom = CurrentLobbyRoomNumber
+                    local previousQueue = ActiveLobbyQueue
+                    local previousAction = LastLobbyJoinAction
+
+                    -- ถือสิทธิ์ระหว่างรอ Leave เพื่อไม่ให้งานอื่นสร้างคิวซ้อน
+                    local recoveryOwner = coroutine.running()
+                    RuntimeFix.JoinOwner = recoveryOwner
+
+                    local recoveryOk, recovered = pcall(function()
+                        if AutoFarmSession.Cancelled
+                            or game.PlaceId ~= AUTO_JOIN_PLACE_ID
+                        then
+                            return false
+                        end
+
+                        -- ฟังก์ชันเดิมรองรับปล่อยคำขอที่หมดเวลา
+                        -- แม้ไม่ได้รับคำยืนยัน Leave
+                        if not RuntimeFix.monarchClearQueue() then
+                            return false
+                        end
+
+                        if AutoFarmSession.Cancelled
+                            or game.PlaceId ~= AUTO_JOIN_PLACE_ID
+                        then
+                            return false
+                        end
+
+                        cycleNextRoomNumber()
+                        LobbyRetryCount += 1
+
+                        HutaoEvoFarmStarted = false
+                        SukunaEvoFarmStarted = false
+
+                        -- เก็บงานเดิมไว้ให้ลูปถัดไปเรียกใหม่
+                        LastLobbyJoinAction = previousAction
+
+                        warn(string.format(
+                            "[LobbyWatchdog] Queue timeout -> retry next room"
+                                .. " | Queue=%s | Room=%s -> %s | Retry=%d",
+                            tostring(previousQueue),
+                            tostring(previousRoom),
+                            tostring(CurrentLobbyRoomNumber),
+                            LobbyRetryCount
+                        ))
+
+                        return true
+                    end)
+
+                    -- คืนสิทธิ์เฉพาะงานนี้ ห้ามล้างสิทธิ์ของงานอื่น
+                    if RuntimeFix.JoinOwner == recoveryOwner then
+                        RuntimeFix.JoinOwner = nil
+                    end
+
+                    if not recoveryOk then
+                        warn("[LobbyWatchdog] Recovery failed:", recovered)
+                    elseif not recovered then
+                        warn("[LobbyWatchdog] Recovery not completed; checking again")
+                    end
+
+                    continue
                 end
 
                 local startOk, startError = pcall(RuntimeFix.tryStartQueueNow)
