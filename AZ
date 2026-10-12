@@ -482,51 +482,200 @@
         table.insert(AutoFarmSession.Cleanups, cleanup)
 
         local ok, entryError = pcall(function()
-            local destination =
-                inside.Position + Vector3.new(0, HEIGHT_OFFSET, 0)
-
-            root.AssemblyLinearVelocity = Vector3.zero
-            root.AssemblyAngularVelocity = Vector3.zero
-
-            -- ย้ายครั้งเดียว ไม่ล็อกตำแหน่งทุกเฟรม
-            root.CFrame =
-                CFrame.new(destination) * root.CFrame.Rotation
-
-            print("[AutoJoin] Moving into queue room:", roomNumber)
-
-            local deadline = os.clock() + ENTRY_TIMEOUT
-
-            repeat
+            local function checkCharacter()
                 if AutoFarmSession.Cancelled
                     or game.PlaceId ~= AUTO_JOIN_PLACE_ID
                     or LocalPlayer.Character ~= character
                     or not root.Parent
+                    or not humanoid.Parent
                     or humanoid.Health <= 0
+                    or not inside.Parent
+                    or not hitbox.Parent
                 then
                     error("Queue entry interrupted")
                 end
+            end
 
-                local attributeRoom =
+            local function moveRoot(position)
+                checkCharacter()
+
+                root.AssemblyLinearVelocity = Vector3.zero
+                root.AssemblyAngularVelocity = Vector3.zero
+                root.CFrame = CFrame.new(position) * root.CFrame.Rotation
+            end
+
+            local nextRoomCheckAt = 0
+            local entryStartedAt = os.clock()
+
+            local function entryConfirmed()
+                local registeredRoom =
                     tonumber(LocalPlayer:GetAttribute("QueueRoom"))
 
                 if confirmedRoom == roomNumber
-                    or attributeRoom == roomNumber
+                    or registeredRoom == roomNumber
                 then
-                    print(
-                        "[AutoJoin] Room entry confirmed:",
-                        roomNumber
+                    return true
+                end
+
+                -- ไม่ลองสร้างแทรกคิวที่ผูกกับผู้เล่นอยู่แล้ว
+                if registeredRoom ~= nil
+                    or LocalPlayer:GetAttribute("QueueLeader") == true
+                    or LocalPlayer:GetAttribute("MatchSearching")
+                then
+                    return false
+                end
+
+                local now = os.clock()
+
+                if now - entryStartedAt < 1
+                    or now < nextRoomCheckAt
+                then
+                    return false
+                end
+
+                nextRoomCheckAt = now + 0.5
+
+                if not root.Parent or not hitbox.Parent then
+                    return false
+                end
+
+                -- ตรวจตำแหน่งตามขนาดและการหมุนของ Hitbox จริง
+                local localPosition =
+                    hitbox.CFrame:PointToObjectSpace(root.Position)
+
+                local halfSize = hitbox.Size * 0.5
+
+                local insideHitbox =
+                    math.abs(localPosition.X) <= halfSize.X
+                    and math.abs(localPosition.Y) <= halfSize.Y
+                    and math.abs(localPosition.Z) <= halfSize.Z
+
+                if not insideHitbox then
+                    return false
+                end
+
+                local lobby = ReplicatedStorage:FindFirstChild("lobby")
+                local stores = lobby and lobby:FindFirstChild("stores")
+                local module = stores
+                    and stores:FindFirstChild("ququeRoomStore")
+
+                if not module or not module:IsA("ModuleScript") then
+                    return false
+                end
+
+                local ok, roomData = pcall(function()
+                    local roomNamespace = require(module)
+                    local roomStore = roomNamespace.namespace:getStore(
+                        "room " .. tostring(roomNumber)
                     )
+
+                    return roomStore:toTable()
+                end)
+
+                if not ok or type(roomData) ~= "table" then
+                    return false
+                end
+
+                if roomData.status ~= "creating" then
+                    return false
+                end
+
+                warn(
+                    "[AutoJoin] Inside creating room; entry event missing"
+                        .. " -> attempt CreateQuque once | Room:",
+                    roomNumber
+                )
+
+                -- อนุญาตให้ createQueue ลองส่งคำขอ
+                -- ยังไม่ใช่การยืนยันว่าคิวถูกสร้างแล้ว
+                return true
+            end
+
+            for attempt = 1, 2 do
+                checkCharacter()
+
+                if entryConfirmed() then
+                    print("[AutoJoin] Room entry ready; attempting queue creation:", roomNumber)
                     return
                 end
 
-                task.wait(0.1)
-            until os.clock() >= deadline
+                if attempt == 2 then
+                    -- ออกนอกขอบเขต Hitbox ตามขนาดและการหมุนจริง
+                    -- คงระดับความสูงของตัวละคร
+                    local cf = hitbox.CFrame
+                    local half = hitbox.Size * 0.5
+
+                    local extentX =
+                        math.abs(cf.RightVector.X) * half.X
+                        + math.abs(cf.UpVector.X) * half.Y
+                        + math.abs(cf.LookVector.X) * half.Z
+
+                    local side =
+                        root.Position.X >= hitbox.Position.X and 1 or -1
+
+                    local outsidePosition = Vector3.new(
+                        hitbox.Position.X + side * (extentX + 6),
+                        root.Position.Y,
+                        root.Position.Z
+                    )
+
+                    confirmedRoom = nil
+
+                    warn(
+                        "[AutoJoin] Entry unconfirmed -> exit and re-enter:",
+                        roomNumber
+                    )
+
+                    moveRoot(outsidePosition)
+
+                    local outsideDeadline = os.clock() + 0.8
+                    repeat
+                        checkCharacter()
+                        task.wait(0.1)
+                    until os.clock() >= outsideDeadline
+
+                    -- หาก Server ยืนยันเข้าคิวระหว่างรอ ไม่ส่งเข้าใหม่
+                    if entryConfirmed() then
+                        print("[AutoJoin] Room entry ready; attempting queue creation:", roomNumber)
+                        return
+                    end
+                end
+
+                moveRoot(
+                    inside.Position + Vector3.new(0, HEIGHT_OFFSET, 0)
+                )
+
+                print(
+                    "[AutoJoin] Moving into queue room:",
+                    roomNumber,
+                    "| Entry attempt:", attempt
+                )
+
+                local deadline = os.clock() + ENTRY_TIMEOUT
+
+                repeat
+                    checkCharacter()
+
+                    if entryConfirmed() then
+                        print(
+                            "[AutoJoin] Room entry ready; attempting queue creation:",
+                            roomNumber
+                        )
+                        return
+                    end
+
+                    task.wait(0.1)
+                until os.clock() >= deadline
+            end
 
             error(string.format(
-                "Room entry timed out | Requested=%s QueueRoom=%s WindowRoom=%s",
+                "Room entry timed out after re-entry"
+                    .. " | Requested=%s QueueRoom=%s WindowRoom=%s"
+                    .. " | Root=%s",
                 tostring(roomNumber),
                 tostring(LocalPlayer:GetAttribute("QueueRoom")),
-                tostring(confirmedRoom)
+                tostring(confirmedRoom),
+                tostring(root.Position)
             ))
         end)
 
@@ -544,6 +693,14 @@
             return false
         end
 
+        if type(RuntimeFix.isTraitReadyForJoin) ~= "function"
+            or not RuntimeFix.isTraitReadyForJoin()
+        then
+            error(
+                "AutoJoin blocked: Sung Jinwoo Trait not ready"
+            )
+        end
+
         if type(payload) ~= "table" then
             error("Queue payload must be a table")
         end
@@ -551,6 +708,7 @@
         -- ฟังก์ชันนี้รองรับเส้นทาง Story/Raid ของสคริปต์เดิม
         if payload.gamemode ~= "Story"
             and payload.gamemode ~= "Raid"
+            and payload.gamemode ~= "Trials"
         then
             error("Unsupported queue mode: " .. tostring(payload.gamemode))
         end
@@ -561,11 +719,20 @@
             request[key] = value
         end
 
-        request.floor = 0
+        if request.gamemode == "Trials" then
+            if request.map ~= "Trials" then
+                error("Invalid Trials map")
+            end
 
-        if request.gamemode == "Raid" then
             request.chapter = 0
-            request.difficulty = 4
+            request.difficulty = 1
+        else
+            request.floor = 0
+
+            if request.gamemode == "Raid" then
+                request.chapter = 0
+                request.difficulty = 4
+            end
         end
 
         local function requireInteger(name, minimum, maximum)
@@ -590,7 +757,11 @@
         end
 
         requireInteger("chapter", 0, 3)
-        requireInteger("floor", 0, 0)
+        if request.gamemode == "Trials" then
+            requireInteger("floor", 1, 65535)
+        else
+            requireInteger("floor", 0, 0)
+        end
         requireInteger("difficulty", 1, 4)
         requireInteger("maxPlayers", 1, 6)
         requireInteger("roomNumber", 1, 6)
@@ -612,6 +783,18 @@
         if LocalPlayer:GetAttribute("MatchSearching") then
             error("Queue creation blocked: MatchSearching")
         end
+
+        -- enterQueueRoom มีการรอ:
+        -- ตรวจใหม่ก่อนส่งคำขอสร้างคิวจริง
+        if AutoFarmSession.Cancelled
+            or not RuntimeFix.isTraitReadyForJoin()
+        then
+            error("AutoJoin blocked: Trait state changed")
+        end
+
+        -- เริ่มจับเวลาก่อนส่ง เผื่อ fire เกิดข้อผิดพลาด
+        -- โดยที่คำขออาจถูกส่งออกไปแล้ว
+        RuntimeFix.markQueueRequestSent()
 
         -- ใช้ serializer ของเกมปัจจุบัน
         packet:fire(request)
@@ -1129,7 +1312,7 @@
             return nil
         end
 
-        for slotNumber = 1, 11 do
+        for slotNumber = 1, RuntimeFix.getInventorySlotCount() do
             local slot = unlocked["Slot" .. slotNumber]
 
             if type(slot) == "table"
@@ -1476,6 +1659,40 @@
             and isInRaid() == true
     end
 
+    local farmRunStore = nil
+
+    local function getLiveFarmArea()
+        local ok, area = pcall(function()
+            if not farmRunStore then
+                farmRunStore = RuntimeFix.requireModule(
+                    ReplicatedStorage,
+                    {"game", "stores", "runStore"}
+                )
+            end
+
+            local state = farmRunStore
+                and farmRunStore.store
+                and farmRunStore.store.state
+
+            if not state or not state.area then
+                return nil
+            end
+
+            local value = state.area:get()
+
+            if type(value) ~= "number"
+                or value < 1
+                or value % 1 ~= 0
+            then
+                return nil
+            end
+
+            return tostring(value)
+        end)
+
+        return ok and area or nil
+    end
+
     local function getAreaFromStatus(text)
         if type(text) ~= "string" then
             return nil
@@ -1483,7 +1700,8 @@
 
         local area = text:match("[Aa]rea%s*(%d+)%s*/%s*%d+")
         if area then
-            return area
+            -- HUD อาจยังแสดง Area เก่า ให้ใช้ Store สดก่อน
+            return getLiveFarmArea() or area
         end
 
         if isShadowGateRaid() then
@@ -2117,7 +2335,12 @@
         local arrived = RuntimeFix.tweenRootTo(
             CFrame.new(targetPosition),
             function()
+                local correctArea =
+                    areaKey == "Infinite"
+                    or getLiveFarmArea() == areaKey
+
                 return areaPart.Parent ~= nil
+                    and correctArea
                     and tostring(CurrentAreaName) == areaKey
                     and not RuntimeFix.EndRoundPaused
                     and getNearestEnemyInArea(areaKey) == nil
@@ -2329,10 +2552,42 @@
                     function()
                         local targetRoot = getEnemyRoot(enemy)
 
-                        return CurrentTarget == enemy
-                            and isEnemyAlive(enemy)
-                            and targetRoot ~= nil
-                            and targetRoot.Parent ~= nil
+                        if CurrentTarget ~= enemy
+                            or not isEnemyAlive(enemy)
+                            or not targetRoot
+                            or not targetRoot.Parent
+                        then
+                            return false
+                        end
+
+                        -- ตรวจระหว่าง Tween ไปหาบอส Shadow Gate
+                        if not retreatMode
+                            and isShadowGateRaid()
+                            and isShadowGateMainBoss(enemy)
+                        then
+                            local hasMinions = CurrentAreaName ~= nil
+                                and hasMinionsAliveInArea(CurrentAreaName)
+
+                            local bossGuarded =
+                                workspace:GetAttribute("RaidBossGuarded") == true
+                                or (
+                                    tonumber(workspace:GetAttribute("RaidOathCount"))
+                                    or 0
+                                ) > 0
+
+                            if hasMinions or bossGuarded then
+                                print(
+                                    "[AutoFarm] Cancel boss Tween ->",
+                                    hasMinions
+                                        and "Minions detected: switching target"
+                                        or "Boss guarded: waiting for minions"
+                                )
+
+                                return false
+                            end
+                        end
+
+                        return true
                     end
                 )
 
@@ -2584,11 +2839,28 @@
         local arrived = RuntimeFix.tweenRootTo(
             CFrame.new(targetPosition),
             function()
-                return area.Parent ~= nil and not hasEnemy()
+                return area.Parent ~= nil
+                    and getLiveFarmArea() == areaKey
+                    and not RuntimeFix.EndRoundPaused
+                    and not hasEnemy()
             end
         )
 
         if AutoFarmSession.Cancelled or not AutoFarmEnabled then
+            return false
+        end
+
+        -- ห้ามบันทึกว่าเดินทางถึง Area เก่า หลัง Store เปลี่ยนแล้ว
+        local liveArea = getLiveFarmArea()
+
+        if liveArea ~= areaKey then
+            print(
+                "[AutoFarm] Cancel old Area travel:",
+                areaKey,
+                "->",
+                tostring(liveArea)
+            )
+
             return false
         end
 
@@ -4918,6 +5190,11 @@
     local LastLobbyJoinAction = nil
     local ActiveLobbyQueue = nil
 
+    -- เริ่มนับใหม่ตรงจังหวะส่งคำขอสร้างห้องจริง
+    function RuntimeFix.markQueueRequestSent()
+        LastLobbyJoinAttemptClock = os.clock()
+    end
+
     RuntimeFix.StartNowRetrySeconds = 1
     RuntimeFix.StartNowLastSentAt = nil
     RuntimeFix.StartNowRoom = nil
@@ -4935,6 +5212,12 @@
             and AZEnabled("Rewards", "AutoClaim")
             and not RuntimeFix.AutoClaimInitialReady
             and not RuntimeFix.AutoClaimJoinReleased
+        then
+            return false
+        end
+
+        if type(RuntimeFix.isTraitReadyForJoin) ~= "function"
+            or not RuntimeFix.isTraitReadyForJoin()
         then
             return false
         end
@@ -5442,18 +5725,46 @@
     end
 
     local function leaveCurrentLobbyQueue(): boolean
+        local function isOutsideQueue()
+            local status = RuntimeFix.QueueStatus
+
+            -- มีหลักฐานว่ายังอยู่ในคิว/กำลังวาร์ป: ต้องรอยืนยันออก
+            if status == "inQuque"
+                or status == "teleporting"
+                or LocalPlayer:GetAttribute("QueueLeader") == true
+                or LocalPlayer:GetAttribute("MatchSearching")
+            then
+                return false
+            end
+
+            -- idle หรือตอนเริ่มต้นที่ยังไม่ได้รับสถานะ
+            -- และไม่มีห้องผูกอยู่กับผู้เล่น
+            return (status == "idle" or status == nil)
+                and LocalPlayer:GetAttribute("QueueRoom") == nil
+        end
+
+        if AutoFarmSession.Cancelled then
+            return false
+        end
+
+        -- สร้างคิวไม่สำเร็จและไม่ได้อยู่ในห้อง:
+        -- ไม่ต้องรอ Leave Event ที่อาจไม่มีวันถูกส่งมา
+        if isOutsideQueue() then
+            print("[LobbyWatchdog] No queue registered -> retry allowed")
+            return true
+        end
+
         local revision = RuntimeFix.QueueIdleRevision
 
         local ok, leaveError = pcall(function()
             local packets = RuntimeFix.getPackets()
+            local packet = packets and packets.leaveQuque
 
-            if not packets.leaveQuque
-                or type(packets.leaveQuque.fire) ~= "function"
-            then
+            if not packet or type(packet.fire) ~= "function" then
                 error("leaveQuque unavailable")
             end
 
-            packets.leaveQuque:fire()
+            packet:fire()
         end)
 
         if not ok then
@@ -5468,32 +5779,33 @@
                 return false
             end
 
-            if RuntimeFix.QueueIdleRevision > revision then
+            if isOutsideQueue() then
+                print("[LobbyWatchdog] Outside queue confirmed")
                 return true
             end
 
-            local animation = PlayerGui:FindFirstChild(
-                "UI Animation (Finished)"
-            )
-
-            local queueGui = animation
-                and animation:FindFirstChild("Quque")
-
-            local leaveButton = queueGui
-                and queueGui:FindFirstChild("Leave")
-
-            if leaveButton
-                and leaveButton:IsA("GuiObject")
-                and not leaveButton.Visible
-                and LocalPlayer:GetAttribute("QueueRoom") == nil
+            -- รับ idle ใหม่จาก Server หลังส่ง Leave
+            if RuntimeFix.QueueIdleRevision > revision
+                and RuntimeFix.QueueStatus == "idle"
+                and LocalPlayer:GetAttribute("QueueLeader") ~= true
+                and not LocalPlayer:GetAttribute("MatchSearching")
             then
+                print("[LobbyWatchdog] Leave confirmed by Server")
                 return true
             end
 
             task.wait(0.1)
         until os.clock() >= deadline
 
-        warn("[LobbyWatchdog] Leave not confirmed.")
+        warn(string.format(
+            "[LobbyWatchdog] Leave unresolved"
+                .. " | Status=%s Room=%s Leader=%s MatchSearching=%s",
+            tostring(RuntimeFix.QueueStatus),
+            tostring(LocalPlayer:GetAttribute("QueueRoom")),
+            tostring(LocalPlayer:GetAttribute("QueueLeader")),
+            tostring(LocalPlayer:GetAttribute("MatchSearching"))
+        ))
+
         return false
     end
 
@@ -5617,20 +5929,60 @@
     end
 
     function RuntimeFix.monarchClearQueue()
-        local hasQueue = ActiveLobbyQueue ~= nil
+        if AutoFarmSession.Cancelled
+            or game.PlaceId ~= AUTO_JOIN_PLACE_ID
+        then
+            return false
+        end
+
+        local timedOut =
+            LastLobbyJoinAttemptClock > 0
+            and os.clock() - LastLobbyJoinAttemptClock
+                >= LOBBY_JOIN_TIMEOUT_SECONDS
+
+        local hasQueue =
+            ActiveLobbyQueue ~= nil
             or RuntimeFix.QueueStatus == "inQuque"
             or RuntimeFix.QueueStatus == "teleporting"
             or LocalPlayer:GetAttribute("QueueRoom") ~= nil
 
-        if hasQueue and not leaveCurrentLobbyQueue() then
-            return false
+        if hasQueue then
+            local leaveConfirmed = leaveCurrentLobbyQueue()
+
+            -- การรอ Leave มี yield: ตรวจอีกครั้งก่อนทำต่อ
+            if AutoFarmSession.Cancelled
+                or game.PlaceId ~= AUTO_JOIN_PLACE_ID
+            then
+                return false
+            end
+
+            if not leaveConfirmed and not timedOut then
+                return false
+            end
+
+            if not leaveConfirmed then
+                warn(string.format(
+                    "[LobbyWatchdog] %ds timeout in Lobby"
+                        .. " | Leave unconfirmed"
+                        .. " | Release local attempt for next room"
+                        .. " | Previous room: %s",
+                    LOBBY_JOIN_TIMEOUT_SECONDS,
+                    tostring(CurrentLobbyRoomNumber)
+                ))
+            end
         end
 
+        -- ล้างสถานะความพยายามของสคริปต์
+        -- ไม่แก้ Attribute หรือ Store ของ Server
         ActiveLobbyQueue = nil
         AutoJoinStarted = false
         LastLobbyJoinAction = nil
         LastLobbyJoinAttemptClock = 0
+
         RuntimeFix.QueueStatus = "idle"
+        RuntimeFix.StartNowRoom = nil
+        RuntimeFix.StartNowLastSentAt = nil
+
         return true
     end
 
@@ -6152,6 +6504,639 @@
         state.Listening = true
     end
 
+    RuntimeFix.TrialsTargets = {
+        {Character = "frieren", Name = "Silver Calamity", Floor = 50},
+        {Character = "rin", Name = "Inferno Prince", Floor = 125},
+    }
+
+    function RuntimeFix.getInventorySlotCount()
+        local config = RuntimeFix.requireModule(
+            ReplicatedStorage,
+            {"assets", "config", "economyConfig"}
+        )
+
+        local count = config and config.characterSlotCount
+
+        if type(count) ~= "number"
+            or count % 1 ~= 0
+            or count < 1
+            or count > 255
+        then
+            error("Invalid economyConfig.characterSlotCount")
+        end
+
+        return count
+    end
+
+    function RuntimeFix.trialsOwns(data, character)
+        if type(data) ~= "table"
+            or type(data.UnlockedCharacters) ~= "table"
+            or type(data.achievements) ~= "table"
+            or type(data.achievements.progress) ~= "table"
+        then
+            error("Trials ownership data unavailable")
+        end
+
+        for index = 1, RuntimeFix.getInventorySlotCount() do
+            local slot = data.UnlockedCharacters["Slot" .. index]
+
+            if type(slot) ~= "table"
+                or type(slot.Unlocked) ~= "boolean"
+            then
+                error("Inventory data unavailable: Slot" .. index)
+            end
+
+            if slot.Unlocked and slot.Character == character then
+                return true, index
+            end
+        end
+
+        return RuntimeFix.storageCount(data, character) > 0, nil
+    end
+
+    function RuntimeFix.getTrialsTask(data)
+        for _, target in ipairs(RuntimeFix.TrialsTargets) do
+            local owned, slot = RuntimeFix.trialsOwns(
+                data, target.Character
+            )
+
+            -- ได้แล้วแต่ยังอยู่ Storage: รับเข้า Slot ก่อนฟาร์มตัวถัดไป
+            if owned and not slot then
+                return target, true
+            end
+
+            if not owned then
+                return target, false
+            end
+        end
+
+        return nil, false
+    end
+
+    function RuntimeFix.trialsReady(data)
+        if RuntimeFix.monarchStage(data) < 3 then
+            return false
+        end
+
+        local hutao = data.CharactersData
+            and data.CharactersData.hutao
+
+        if type(hutao) ~= "table"
+            or hutao.IsUltimateUnlocked ~= true
+            or RuntimeFix.getPostMonarchPlan(data) ~= nil
+        then
+            return false
+        end
+
+        for _, node in ipairs(RuntimeFix.IgrisNodeOrder) do
+            if RuntimeFix.getIgrisLevel(data, node) < 5 then
+                return false
+            end
+        end
+
+        return true
+    end
+
+    function RuntimeFix.selectTrialsSlot(data)
+        local config = RuntimeFix.requireModule(
+            ReplicatedStorage,
+            {"assets", "config", "characterRollConfig"}
+        )
+
+        local rarities = config and config.rarityByCharacter
+        if type(rarities) ~= "table" then
+            error("characterRollConfig.rarityByCharacter unavailable")
+        end
+
+        local weights = {
+            Epic = 1,
+            Legendary = 2,
+            Mythic = 3,
+            Arcane = 4,
+            Zenless = 5,
+        }
+
+        local protected = {
+            sung_jinwoo = true,
+            hutao = true,
+            frieren = true,
+            rin = true,
+        }
+
+        local lowestSlot = nil
+        local lowestWeight = math.huge
+
+        for index = 1, RuntimeFix.getInventorySlotCount() do
+            local slot = data.UnlockedCharacters["Slot" .. index]
+
+            if type(slot) ~= "table" then
+                error("Inventory data unavailable: Slot" .. index)
+            end
+
+            if slot.Unlocked == true then
+                local character = slot.Character
+
+                if type(character) ~= "string" then
+                    error("Invalid Character: Slot" .. index)
+                end
+
+                if character == "" then
+                    return index
+                end
+
+                if not protected[character]
+                    and slot.Favourite ~= true
+                then
+                    local rarity = rarities[character]
+                    local weight = weights[rarity]
+
+                    -- ไม่เดา Rarity ของตัวที่ไม่มีใน Config
+                    if not weight then
+                        error("Unknown Rarity: " .. character)
+                    end
+
+                    if weight < lowestWeight then
+                        lowestSlot = index
+                        lowestWeight = weight
+                    end
+                end
+            end
+        end
+
+        return lowestSlot
+    end
+
+    RuntimeFix.TrialsEvolution = {
+        Pending = nil,
+        RetryAt = 0,
+        Listening = false,
+        ActiveForEvo = nil,
+    }
+
+    RuntimeFix.TrialsEvolutionRecipes = {
+        {
+            Character = "rin",
+            Name = "Inferno Prince",
+            Money = 1000000,
+            Gems = 10000,
+            Materials = {
+                ["101"] = 20,
+                ["107"] = 25,
+                ["104"] = 12,
+                ["109"] = 8,
+            },
+        },
+        {
+            Character = "frieren",
+            Name = "Silver Calamity",
+            Money = 20000000,
+            Gems = 25000,
+            Materials = {
+                ["101"] = 300,
+                ["103"] = 85,
+                ["108"] = 50,
+                ["110"] = 50,
+            },
+        },
+    }
+
+    function RuntimeFix.getTrialsEvolutionPlan(data)
+        if not RuntimeFix.trialsReady(data)
+            or not RuntimeFix.findOwnedSlot(data, "rin")
+            or not RuntimeFix.findOwnedSlot(data, "frieren")
+        then
+            return nil
+        end
+
+        if type(data.material) ~= "table"
+            or type(data.currencies) ~= "table"
+            or type(data.CharactersData) ~= "table"
+        then
+            error("Trials Evolution account unavailable")
+        end
+
+        local money = tonumber(data.currencies.money)
+        local gems = tonumber(data.currencies.gems)
+
+        if money == nil or gems == nil then
+            error("Trials Evolution Money/Gems unavailable")
+        end
+
+        -- ลำดับนี้บังคับ Rin ก่อน Frieren
+        for _, recipe in ipairs(RuntimeFix.TrialsEvolutionRecipes) do
+            local character = data.CharactersData[recipe.Character]
+
+            if type(character) ~= "table"
+                or type(character.IsUltimateUnlocked) ~= "boolean"
+            then
+                error("Evolution state unavailable: " .. recipe.Character)
+            end
+
+            if not character.IsUltimateUnlocked then
+                local missing = {}
+
+                for id, required in pairs(recipe.Materials) do
+                    if getMaterialAmount(data, id) < required then
+                        missing[id] = true
+                    end
+                end
+
+                local chapter = nil
+
+                if recipe.Character == "rin" then
+                    if missing["101"] or missing["104"] then
+                        chapter = 1
+                    elseif missing["107"] or missing["109"] then
+                        chapter = 2
+                    end
+                else
+                    if missing["101"]
+                        or missing["108"]
+                        or missing["110"]
+                    then
+                        chapter = 1
+                    elseif missing["103"] then
+                        chapter = 3
+                    end
+                end
+
+                local target = nil
+
+                if chapter then
+                    target = {
+                        Map = "hxh",
+                        Chapter = chapter,
+                        Difficulty = 4,
+                    }
+                elseif money < recipe.Money or gems < recipe.Gems then
+                    target = {
+                        Map = "sololevelingraid",
+                        Chapter = 1,
+                        Difficulty = 4,
+                    }
+                end
+
+                return {
+                    Recipe = recipe,
+                    Target = target,
+                    Reason = target
+                        and (recipe.Name .. " Evo resources")
+                        or (recipe.Name .. " ready -> Lobby for Evo"),
+                }
+            end
+        end
+
+        return nil
+    end
+
+    function RuntimeFix.listenTrialsEvolution(packets)
+        local state = RuntimeFix.TrialsEvolution
+        if state.Listening then
+            return
+        end
+
+        local packet = packets.evolveCharacterResult
+        if not packet or type(packet.on) ~= "function" then
+            error("evolveCharacterResult unavailable")
+        end
+
+        local disconnect = packet:on(function(result)
+            if AutoFarmSession.Cancelled
+                or type(result) ~= "table"
+            then
+                return
+            end
+
+            local pending = state.Pending
+            if pending and result.character == pending.Character then
+                pending.Response = {
+                    Success = result.status == "success",
+                    Reason = result.status,
+                }
+            end
+        end)
+
+        table.insert(AutoFarmSession.Cleanups, function()
+            if typeof(disconnect) == "function" then
+                disconnect()
+            elseif typeof(disconnect) == "RBXScriptConnection" then
+                disconnect:Disconnect()
+            end
+        end)
+
+        state.Listening = true
+    end
+
+    function RuntimeFix.runTrialsEvolution()
+        if AutoFarmSession.Cancelled
+            or game.PlaceId ~= AUTO_JOIN_PLACE_ID
+        then
+            return false
+        end
+
+        local state = RuntimeFix.TrialsEvolution
+        local data = RuntimeFix.readAccount()
+
+        if not data
+            or not RuntimeFix.trialsReady(data)
+            or not RuntimeFix.findOwnedSlot(data, "rin")
+            or not RuntimeFix.findOwnedSlot(data, "frieren")
+        then
+            return false
+        end
+
+        local pending = state.Pending
+
+        if pending then
+            local character = data.CharactersData
+                and data.CharactersData[pending.Character]
+
+            if type(character) == "table"
+                and character.IsUltimateUnlocked == true
+            then
+                print(
+                    "[TrialsEvo] CONFIRMED:",
+                    pending.Character
+                )
+                state.Pending = nil
+                state.ActiveForEvo = nil
+            elseif pending.Response
+                and not pending.Response.Success
+            then
+                warn(
+                    "[TrialsEvo] Rejected:",
+                    pending.Character,
+                    pending.Response.Reason
+                )
+                state.Pending = nil
+                state.ActiveForEvo = nil
+                state.RetryAt = os.clock() + 5
+                return false
+            else
+                if not pending.Warned
+                    and os.clock() - pending.SentAt >= 15
+                then
+                    pending.Warned = true
+                    warn(
+                        "[TrialsEvo] Waiting for Account confirmation:",
+                        pending.Character,
+                        "| No duplicate request"
+                    )
+                end
+                return false
+            end
+        end
+
+        if os.clock() < state.RetryAt then
+            return false
+        end
+
+        local plan = RuntimeFix.getTrialsEvolutionPlan(data)
+
+        if not plan then
+            state.ActiveForEvo = nil
+
+            if not RuntimeFix.monarchClearQueue()
+                or not prepareTeam()
+            then
+                return false
+            end
+
+            RuntimeFix.igrisLog(
+                "Trials Evo complete | Rin Slot1 / Frieren Slot2"
+            )
+            return true
+        end
+
+        if not plan.Target then
+            if not RuntimeFix.monarchClearQueue() then
+                return false
+            end
+
+            local packets = RuntimeFix.getPackets()
+            local packet = packets.evolveCharacter
+
+            if not packet or type(packet.fire) ~= "function" then
+                error("evolveCharacter unavailable")
+            end
+
+            RuntimeFix.listenTrialsEvolution(packets)
+
+            -- ป้องกัน prepareTeam งานอื่นสลับ Active กลับระหว่าง Evo
+            state.ActiveForEvo = plan.Recipe.Character
+
+            if not prepareTeam()
+                or not RuntimeFix.equipPostMonarchActive(
+                    plan.Recipe.Character
+                )
+            then
+                state.ActiveForEvo = nil
+                state.RetryAt = os.clock() + 5
+                return false
+            end
+
+            local fresh = RuntimeFix.readAccount()
+            local freshPlan = fresh
+                and RuntimeFix.getTrialsEvolutionPlan(fresh)
+
+            if AutoFarmSession.Cancelled
+                or not freshPlan
+                or freshPlan.Target
+                or freshPlan.Recipe.Character ~= plan.Recipe.Character
+                or fresh.character ~= plan.Recipe.Character
+            then
+                state.ActiveForEvo = nil
+                return false
+            end
+
+            state.Pending = {
+                Character = plan.Recipe.Character,
+                SentAt = os.clock(),
+                Response = nil,
+                Warned = false,
+            }
+
+            packet:fire(plan.Recipe.Character)
+
+            print("[TrialsEvo] Requested:", plan.Recipe.Character)
+            return true
+        end
+
+        state.ActiveForEvo = nil
+
+        local target = plan.Target
+        local queueKey = "TrialsEvo_" .. plan.Recipe.Character
+            .. "_" .. target.Map
+            .. "_" .. tostring(target.Chapter)
+
+        if ActiveLobbyQueue == queueKey
+            and LastLobbyJoinAttemptClock > 0
+            and os.clock() - LastLobbyJoinAttemptClock
+                < LOBBY_JOIN_TIMEOUT_SECONDS
+        then
+            return true
+        end
+
+        local retrying = ActiveLobbyQueue == queueKey
+
+        if not RuntimeFix.monarchClearQueue() then
+            return false
+        end
+
+        if retrying then
+            cycleNextRoomNumber()
+        end
+
+        if not prepareTeam()
+            or AutoFarmSession.Cancelled
+            or not queueScriptOnTeleport()
+        then
+            return false
+        end
+
+        ActiveLobbyQueue = queueKey
+        LastLobbyJoinAttemptClock = os.clock()
+        LastLobbyJoinAction = RuntimeFix.runMonarch
+
+        local isStory = target.Map == "hxh"
+
+        RuntimeFix.createQueue({
+            gamemode = isStory and "Story" or "Raid",
+            map = isStory and "Hxh" or "ShadowGate",
+            chapter = isStory and target.Chapter or 0,
+            floor = 0,
+            difficulty = 4,
+            maxPlayers = 1,
+            friendsOnly = false,
+            roomNumber = CurrentLobbyRoomNumber,
+        })
+
+        RuntimeFix.igrisLog(string.format(
+            "%s | %s Chapter %d Nightmare",
+            plan.Reason, target.Map, target.Chapter
+        ))
+
+        return true
+    end
+
+    function RuntimeFix.runAutoTrials()
+        if AutoFarmSession.Cancelled
+            or game.PlaceId ~= AUTO_JOIN_PLACE_ID
+        then
+            return false
+        end
+
+        local data = RuntimeFix.readAccount()
+        if not data or not RuntimeFix.trialsReady(data) then
+            return false
+        end
+
+        local target, needsStorage = RuntimeFix.getTrialsTask(data)
+
+        if not target then
+            return RuntimeFix.runTrialsEvolution()
+        end
+
+        if needsStorage then
+            if not RuntimeFix.monarchClearQueue() then
+                return false
+            end
+
+            RuntimeFix.igrisLog(
+                "Trials | Retrieve " .. target.Name .. " from Storage"
+            )
+            return false
+        end
+
+        local seasonConfig = RuntimeFix.requireModule(
+            ReplicatedStorage,
+            {"assets", "config", "LeaderboardSeasonConfig"}
+        )
+
+        local seasonId = seasonConfig
+            and seasonConfig.Season
+            and seasonConfig.Season.Id
+
+        if type(seasonId) ~= "number"
+            or seasonId % 1 ~= 0
+        then
+            error("Trials Season.Id unavailable")
+        end
+
+        local progress = data.achievements.progress
+        local prefix = "trials.s" .. tostring(seasonId)
+
+        local function readProgress(key)
+            local raw = progress[key]
+            if raw == nil then
+                return 0
+            end
+
+            local value = tonumber(raw)
+            if not value or value < 0 or value % 1 ~= 0 then
+                error("Invalid Trials progress: " .. key)
+            end
+
+            return value
+        end
+
+        local available = math.max(
+            readProgress(prefix .. ".room"),
+            readProgress(prefix .. ".unlocked")
+        ) + 1
+
+        local floor = math.min(target.Floor, available)
+        local queueKey = "Trials_" .. target.Character
+            .. "_" .. tostring(floor)
+
+        if ActiveLobbyQueue == queueKey
+            and LastLobbyJoinAttemptClock > 0
+            and os.clock() - LastLobbyJoinAttemptClock
+                < LOBBY_JOIN_TIMEOUT_SECONDS
+        then
+            return true
+        end
+
+        local retrying = ActiveLobbyQueue == queueKey
+
+        if not RuntimeFix.monarchClearQueue() then
+            return false
+        end
+
+        if retrying then
+            cycleNextRoomNumber()
+        end
+
+        if not prepareTeam()
+            or AutoFarmSession.Cancelled
+            or not queueScriptOnTeleport()
+        then
+            return false
+        end
+
+        ActiveLobbyQueue = queueKey
+        LastLobbyJoinAttemptClock = os.clock()
+        LastLobbyJoinAction = RuntimeFix.runMonarch
+
+        RuntimeFix.createQueue({
+            gamemode = "Trials",
+            map = "Trials",
+            chapter = 0,
+            floor = floor,
+            difficulty = 1,
+            maxPlayers = 1,
+            friendsOnly = true,
+            roomNumber = CurrentLobbyRoomNumber,
+        })
+
+        RuntimeFix.igrisLog(string.format(
+            "Trials | Find %s | Start Floor %d Solo | Room %d",
+            target.Name, floor, CurrentLobbyRoomNumber
+        ))
+
+        return true
+    end
+
     function RuntimeFix.runAutoIgris()
         if AutoFarmSession.Cancelled
             or game.PlaceId ~= AUTO_JOIN_PLACE_ID
@@ -6203,14 +7188,7 @@
 
         local plan = RuntimeFix.getIgrisPlan(data)
         if not plan then
-            if not RuntimeFix.monarchClearQueue()
-                or not prepareTeam()
-            then
-                return false
-            end
-
-            RuntimeFix.igrisLog("Complete | All nodes Lv.5")
-            return true
+            return RuntimeFix.runAutoTrials()
         end
 
         if plan.Ready then
@@ -6849,7 +7827,7 @@
             local hutaoSlot = nil
             local sukunaSlot = nil
 
-            for slotNumber = 1, 11 do
+            for slotNumber = 1, RuntimeFix.getInventorySlotCount() do
                 local slot = unlocked["Slot" .. slotNumber]
 
                 if type(slot) == "table"
@@ -6936,6 +7914,59 @@
                 return false
             end
 
+            local rinSlot = RuntimeFix.findOwnedSlot(data, "rin")
+            local frierenSlot = RuntimeFix.findOwnedSlot(data, "frieren")
+
+            if rinSlot
+                and frierenSlot
+                and RuntimeFix.trialsReady(data)
+            then
+                local evoState = RuntimeFix.TrialsEvolution
+                local evolvingFrieren = evoState
+                    and evoState.ActiveForEvo == "frieren"
+
+                local mainSlot = evolvingFrieren
+                    and frierenSlot or rinSlot
+
+                local subSlot = evolvingFrieren
+                    and rinSlot or frierenSlot
+
+                -- จัด Sub ก่อน แล้วค่อยตรวจ Main/Active
+                if not equipAndVerify(subSlot, 2)
+                    or not equipAndVerify(mainSlot, 1)
+                then
+                    return false
+                end
+
+                local mainCharacter = evolvingFrieren
+                    and "frieren" or "rin"
+
+                if not RuntimeFix.equipPostMonarchActive(mainCharacter) then
+                    return false
+                end
+
+                local final = RuntimeFix.readAccount()
+                local equipped = final and final.EquippedCharacterSlots
+
+                if type(equipped) ~= "table"
+                    or tonumber(equipped.Slot1) ~= mainSlot
+                    or tonumber(equipped.Slot2) ~= subSlot
+                    or final.character ~= mainCharacter
+                then
+                    return false
+                end
+
+                print(
+                    "[PrepareTeam] CONFIRMED:",
+                    mainCharacter,
+                    "Slot1 |",
+                    evolvingFrieren and "rin" or "frieren",
+                    "Slot2"
+                )
+
+                return true
+            end
+
             local carrySlot, carryName =
                 RuntimeFix.findCraftCarrySlot(data)
 
@@ -6958,7 +7989,7 @@
                 local fallbackSlot = nil
                 local fallbackCharacter = nil
 
-                for slotNumber = 1, 11 do
+                for slotNumber = 1, RuntimeFix.getInventorySlotCount() do
                     local slot = unlocked["Slot" .. slotNumber]
 
                     if type(slot) == "table"
@@ -7213,6 +8244,7 @@
 
     local SHADOW_ARISE_SCAN_DELAY = 0.5
     local SHADOW_ARISE_RETRY_DELAY = 3
+    local SHADOW_ARISE_MAX_DISTANCE = 100
 
     local LastShadowAriseScan = 0
     local LastAriseDebug = 0
@@ -7331,7 +8363,9 @@
                     local distance =
                         (root.Position - spot.Position).Magnitude
 
-                    if distance < bestDistance then
+                    if distance <= SHADOW_ARISE_MAX_DISTANCE
+                        and distance < bestDistance
+                    then
                         bestDistance = distance
                         bestSpot = spot
                         bestPrompt = prompt
@@ -8054,10 +9088,12 @@
             katakuri = true,
             hutao = true,
             sung_jinwoo = true,
+            frieren = true,
+            rin = true,
         }
 
         -- เลือกช่องแรกที่ปลดล็อกและแทนที่ได้
-        for slotNumber = 1, 11 do
+        for slotNumber = 1, RuntimeFix.getInventorySlotCount() do
             local slot = unlocked["Slot" .. slotNumber]
 
             if type(slot) == "table"
@@ -8167,11 +9203,29 @@
             end
         end
 
+        if not character and RuntimeFix.trialsReady(data) then
+            local task, needsStorage = RuntimeFix.getTrialsTask(data)
+
+            if task and needsStorage then
+                character = task.Character
+            end
+        end
+
         if not character then
             return false
         end
 
-        local targetSlot = findLowestRaritySlot()
+        local isTrialsCharacter =
+            character == "frieren"
+            or character == "rin"
+
+        local targetSlot
+
+        if isTrialsCharacter then
+            targetSlot = RuntimeFix.selectTrialsSlot(data)
+        else
+            targetSlot = findLowestRaritySlot()
+        end
 
         if not targetSlot then
             if os.clock() >= RuntimeFix.StorageWarningAt then
@@ -8208,6 +9262,22 @@
             hutao = true,
             sung_jinwoo = true,
         }
+
+        if isTrialsCharacter then
+            protected = {
+                sung_jinwoo = true,
+                hutao = true,
+                frieren = true,
+                rin = true,
+            }
+
+            -- ตรวจช่อง Rarity ต่ำสุดใหม่ก่อนส่งคำขอ
+            if not latest
+                or RuntimeFix.selectTrialsSlot(latest) ~= targetSlot
+            then
+                return false
+            end
+        end
 
         if type(target) ~= "table"
             or target.Unlocked ~= true
@@ -11289,6 +12359,10 @@
         local hutaoStatusLabel
         local hutaoEvoStatusLabel
         local jinwooStatusLabel
+        local rinStatusLabel
+        local frierenStatusLabel
+        local igrisSummaryLabel
+        local igrisNodeLabels = {}
 
         local crownStatusLabel
         local wingsStatusLabel
@@ -11654,7 +12728,7 @@
             moneyValueLabel = createInfoCard(content, "MONEY", 0.345)
             crystalValueLabel = createInfoCard(content, "CRYSTAL", 0.68)
 
-            createDivider(content, 0.22)
+            createDivider(content, 0.17)
 
             slot1StatusLabel =
                 createStatusRow(content, "Slot 1 | -", 0.01, 0.30)
@@ -11685,7 +12759,7 @@
             jinwooStatusLabel.TextWrapped = true
             jinwooStatusLabel.TextYAlignment = Enum.TextYAlignment.Top
 
-            createDivider(content, 0.72)
+            createDivider(content, 0.81)
 
             local craftBlock = Instance.new("Frame")
             craftBlock.Name = "CraftStatusBlock"
@@ -11778,6 +12852,129 @@
             statusLabel.Visible = true
 
             statusLimit.MaxTextSize = 15
+
+            -- ขยายกรอบหลัก
+            panel.Position = UDim2.fromScale(0.5, 0.5)
+            panel.Size = UDim2.fromScale(0.92, 0.92)
+            panelLimit.MaxSize = Vector2.new(850, 780)
+
+            -- โลโก้อยู่ข้างข้อความด้านบน
+            logoCard.Position = UDim2.fromScale(0.14, 0.105)
+            logoCard.Size = UDim2.fromScale(0.20, 0.16)
+
+            caption.Position = UDim2.fromScale(0.60, 0.045)
+            caption.Size = UDim2.fromScale(0.70, 0.035)
+
+            title.Position = UDim2.fromScale(0.60, 0.11)
+            title.Size = UDim2.fromScale(0.70, 0.085)
+            titleLimit.MaxTextSize = 32
+
+            divider.Position = UDim2.fromScale(0.5, 0.19)
+            divider.Size = UDim2.new(0.88, 0, 0, 2)
+
+            -- Panel สถานะใช้พื้นที่ใต้หัวข้อทั้งหมด
+            statusCard.Position = UDim2.fromScale(0.5, 0.59)
+            statusCard.Size = UDim2.fromScale(0.94, 0.76)
+
+            statusHeading.Position = UDim2.fromScale(0.5, 0.045)
+            statusHeading.Size = UDim2.fromScale(0.90, 0.045)
+
+            statusLabel.Position = UDim2.fromScale(0.5, 0.125)
+            statusLabel.Size = UDim2.fromScale(0.92, 0.09)
+
+            content.Position = UDim2.fromScale(0.5, 0.585)
+            content.Size = UDim2.fromScale(0.95, 0.79)
+
+            -- จัดแถวข้อมูลเดิมใหม่
+            for _, value in ipairs({
+                levelValueLabel,
+                moneyValueLabel,
+                crystalValueLabel,
+            }) do
+                value.Parent.Size = UDim2.fromScale(0.31, 0.14)
+            end
+
+            slot1StatusLabel.Position = UDim2.fromScale(0.01, 0.20)
+            slot2StatusLabel.Position = UDim2.fromScale(0.54, 0.20)
+
+            hutaoStatusLabel.Position = UDim2.fromScale(0.01, 0.29)
+            hutaoEvoStatusLabel.Position = UDim2.fromScale(0.54, 0.29)
+
+            jinwooStatusLabel.Position = UDim2.fromScale(0.01, 0.38)
+            jinwooStatusLabel.Size = UDim2.fromScale(0.98, 0.11)
+
+            rinStatusLabel =
+                createStatusRow(content, "Rin | รอข้อมูล", 0.01, 0.51)
+
+            frierenStatusLabel =
+                createStatusRow(content, "Frieren | รอข้อมูล", 0.54, 0.51)
+
+            for _, label in ipairs({
+                rinStatusLabel, frierenStatusLabel,
+            }) do
+                label.Size = UDim2.fromScale(0.45, 0.115)
+                label.TextWrapped = true
+                label.TextYAlignment = Enum.TextYAlignment.Top
+            end
+
+            craftBlock.Position = UDim2.fromScale(0.01, 0.83)
+            craftBlock.Size = UDim2.fromScale(0.98, 0.16)
+
+            -- Igris: สรุปรวมและแถวระดับทั้ง 4 โหนด
+            local igrisBlock = Instance.new("Frame")
+            igrisBlock.Name = "IgrisStatusBlock"
+            igrisBlock.BackgroundTransparency = 1
+            igrisBlock.Position = UDim2.fromScale(0.01, 0.65)
+            igrisBlock.Size = UDim2.fromScale(0.98, 0.14)
+            igrisBlock.ZIndex = 4
+            igrisBlock.Parent = content
+
+            igrisSummaryLabel = Instance.new("TextLabel")
+            igrisSummaryLabel.Name = "Summary"
+            igrisSummaryLabel.BackgroundTransparency = 1
+            igrisSummaryLabel.Size = UDim2.fromScale(1, 0.28)
+            igrisSummaryLabel.Font = Enum.Font.GothamBold
+            igrisSummaryLabel.Text = "IGRIS | รอข้อมูล"
+            igrisSummaryLabel.TextColor3 = Color3.fromRGB(115, 225, 255)
+            igrisSummaryLabel.TextScaled = true
+            igrisSummaryLabel.TextXAlignment = Enum.TextXAlignment.Left
+            igrisSummaryLabel.RichText = true
+            igrisSummaryLabel.ZIndex = 5
+            igrisSummaryLabel.Parent = igrisBlock
+
+            local summaryLimit = Instance.new("UITextSizeConstraint")
+            summaryLimit.MaxTextSize = 15
+            summaryLimit.Parent = igrisSummaryLabel
+
+            for index, node in ipairs({
+                "Blade", "Speed", "Loyalty", "Command",
+            }) do
+                local column = (index - 1) % 2
+                local row = math.floor((index - 1) / 2)
+
+                local label = Instance.new("TextLabel")
+                label.Name = node
+                label.BackgroundTransparency = 1
+                label.Position = UDim2.fromScale(
+                    column * 0.51,
+                    0.34 + row * 0.33
+                )
+                label.Size = UDim2.fromScale(0.49, 0.29)
+                label.Font = Enum.Font.GothamMedium
+                label.Text = node .. " | -/5"
+                label.TextColor3 = Color3.fromRGB(235, 235, 245)
+                label.TextScaled = true
+                label.TextXAlignment = Enum.TextXAlignment.Left
+                label.RichText = true
+                label.ZIndex = 5
+                label.Parent = igrisBlock
+
+                local limit = Instance.new("UITextSizeConstraint")
+                limit.MaxTextSize = 14
+                limit.Parent = label
+
+                igrisNodeLabels[node] = label
+            end
 
             toggle.BackgroundColor3 = Color3.fromRGB(26, 24, 43)
             toggle.BackgroundTransparency = 0.08
@@ -12274,6 +13471,67 @@
             return action .. " | เป้าหมาย: " .. goal
         end
 
+        local function getTrialsUnitStatusText(data, characterId, name)
+            if not data then
+                return name .. " | รอข้อมูล"
+            end
+
+            -- ตรวจครบทุกช่องตาม Config และนับ Storage ด้วย
+            local ok, owned, slot = pcall(
+                RuntimeFix.trialsOwns,
+                data,
+                characterId
+            )
+
+            if not ok then
+                return name .. " | รอข้อมูล"
+            end
+
+            if not owned then
+                return name
+                    .. ' | <font color="#FF5E6A">ยังไม่มี</font>'
+                    .. '\nEvo | ยังไม่มีตัวละคร'
+            end
+
+            local location = slot
+                and ("Slot " .. tostring(slot))
+                or "Storage"
+
+            local characters = data.CharactersData
+            local character = type(characters) == "table"
+                and characters[characterId]
+
+            local evolved = type(character) == "table"
+                and character.IsUltimateUnlocked
+
+            local evoText
+
+            if evolved == true then
+                evoText = '<font color="#00E98B">Evo แล้ว</font>'
+            elseif evolved == false then
+                evoText = '<font color="#FFD166">ยังไม่ Evo</font>'
+            elseif not slot then
+                evoText = "รอนำลง Slot เพื่อตรวจ Evo"
+            else
+                evoText = "รอข้อมูล Evo"
+            end
+
+            local pending = RuntimeFix.TrialsEvolution
+                and RuntimeFix.TrialsEvolution.Pending
+
+            if pending and pending.Character == characterId
+                and evolved ~= true
+            then
+                evoText =
+                    '<font color="#73E1FF">กำลัง Evo — รอยืนยัน</font>'
+            end
+
+            return name
+                .. ' | <font color="#00E98B">มีแล้ว</font>'
+                .. " (" .. location .. ")"
+                .. "\nEvo | " .. evoText
+        end
+
         local function refreshStatus()
             local activityOk, activityText = pcall(
                 getCurrentActivityText
@@ -12303,6 +13561,99 @@
             end
 
             local data = RuntimeFix.readAccount()
+
+            if rinStatusLabel then
+                rinStatusLabel.Text = getTrialsUnitStatusText(
+                    data,
+                    "rin",
+                    "Rin"
+                )
+            end
+
+            if frierenStatusLabel then
+                frierenStatusLabel.Text = getTrialsUnitStatusText(
+                    data,
+                    "frieren",
+                    "Frieren"
+                )
+            end
+
+            if igrisSummaryLabel then
+                local progress = data
+                    and data.achievements
+                    and data.achievements.progress
+
+                local total = 0
+                local completeNodes = 0
+                local allKnown = type(progress) == "table"
+
+                local pending = RuntimeFix.IgrisAuto
+                    and RuntimeFix.IgrisAuto.Pending
+
+                for _, node in ipairs({
+                    "Blade", "Speed", "Loyalty", "Command",
+                }) do
+                    local level = nil
+
+                    if type(progress) == "table" then
+                        local raw = progress["igris." .. node]
+
+                        if raw == nil then
+                            level = 0
+                        else
+                            local value = tonumber(raw)
+
+                            if value
+                                and value % 1 == 0
+                                and value >= 0
+                                and value <= 5
+                            then
+                                level = value
+                            end
+                        end
+                    end
+
+                    local label = igrisNodeLabels[node]
+
+                    if level == nil then
+                        allKnown = false
+                        label.Text = node .. " | รอข้อมูล"
+                    else
+                        total += level
+
+                        if level == 5 then
+                            completeNodes += 1
+                            label.Text = node
+                                .. ' | <font color="#00E98B">5/5 MAX</font>'
+                        else
+                            label.Text = node
+                                .. ' | <font color="#FFD166">'
+                                .. tostring(level)
+                                .. '/5</font>'
+                        end
+
+                        if pending and pending.Node == node then
+                            label.Text = label.Text
+                                .. ' <font color="#73E1FF">→ '
+                                .. tostring(pending.Level)
+                                .. ' รอยืนยัน</font>'
+                        end
+                    end
+                end
+
+                if not allKnown then
+                    igrisSummaryLabel.Text = "IGRIS | กำลังรอข้อมูล"
+                elseif completeNodes == 4 then
+                    igrisSummaryLabel.Text =
+                        'IGRIS | <font color="#00E98B">MAX ทุกโหมด 20/20</font>'
+                else
+                    igrisSummaryLabel.Text = string.format(
+                        "IGRIS | %d/20 ระดับ • เต็มแล้ว %d/4 โหมด",
+                        total,
+                        completeNodes
+                    )
+                end
+            end
 
             if not data then
                 levelValueLabel.Text = "-"
@@ -12995,6 +14346,40 @@
                     warn("[AutoStart] Start Now failed:", startError)
                 end
 
+                -- Debug ใช้ลูป Watchdog เดิม ไม่สร้างลูปเพิ่ม
+                local debugNow = os.clock()
+
+                if debugNow >= (RuntimeFix.NextQueueDebugAt or 0) then
+                    RuntimeFix.NextQueueDebugAt = debugNow + 5
+
+                    local age = LastLobbyJoinAttemptClock > 0
+                        and math.floor(debugNow - LastLobbyJoinAttemptClock)
+                        or -1
+
+                    local monarch = RuntimeFix.Monarch
+
+                    warn(string.format(
+                        "[QueueFlow] Room=%s ActiveQueue=%s Age=%s Status=%s"
+                            .. " | JoinOwner=%s MonarchBusy=%s"
+                            .. " | StoredPending=%s PreparingTeam=%s Crafting=%s"
+                            .. " | Redeem=%s Unlock=%s SkillTree=%s Summon=%s",
+                        tostring(CurrentLobbyRoomNumber),
+                        tostring(ActiveLobbyQueue),
+                        tostring(age),
+                        tostring(RuntimeFix.QueueStatus),
+                        tostring(RuntimeFix.JoinOwner ~= nil),
+                        tostring(monarch and monarch.Busy),
+                        tostring(RuntimeFix.StoredPending ~= nil
+                            and RuntimeFix.StoredPending ~= false),
+                        tostring(RuntimeFix.PreparingTeam),
+                        tostring(RuntimeFix.Crafting),
+                        tostring(AutoRedeemCodesEnabled),
+                        tostring(AutoUnlockSlotsEnabled),
+                        tostring(AutoUpgradeSkillTreeEnabled),
+                        tostring(CustomAutoRollEnabled)
+                    ))
+                end
+
                 local jinwooData = RuntimeFix.readAccount()
 
                 if not jinwooData then
@@ -13131,6 +14516,64 @@
         },
     }
 
+    function RuntimeFix.isTraitReadyForJoin()
+        local state = RuntimeFix.AutoTrait
+
+        -- ยังเริ่มระบบไม่ครบ: ห้ามปล่อยเข้าด่าน
+        if not state or AutoFarmSession.Cancelled then
+            return false
+        end
+
+        if not state.Enabled then
+            return true
+        end
+
+        -- ต้องรอคำขอเดิมและข้อมูลบัญชีให้ซิงค์ก่อน
+        if state.Busy or state.Pending then
+            return false
+        end
+
+        local data = RuntimeFix.readAccount()
+
+        if not data
+            or type(data.UnlockedCharacters) ~= "table"
+            or type(data.CharactersData) ~= "table"
+            or type(data.currencies) ~= "table"
+        then
+            return false
+        end
+
+        local balance = tonumber(data.currencies.traitRerolls)
+        if balance == nil then
+            return false
+        end
+
+        for _, characterId in ipairs(state.Targets) do
+            if RuntimeFix.findOwnedSlot(data, characterId) then
+                local character = data.CharactersData[characterId]
+                local traitData = type(character) == "table"
+                    and character.TraitData
+
+                local traitId = type(traitData) == "table"
+                    and tonumber(traitData.Trait)
+
+                if traitId == nil then
+                    return false
+                end
+
+                if not state.KeepTraitIds[traitId]
+                    and balance >= 1
+                then
+                    return false
+                end
+            end
+        end
+
+        -- ไม่มีตัวเป้าหมายใน Slot:
+        -- อนุญาตให้ระบบหา/รับตัวละครเดิมทำงานต่อ
+        return true
+    end
+
     function RuntimeFix.runAutoTraits()
         local state = RuntimeFix.AutoTrait
 
@@ -13138,11 +14581,17 @@
             return false
         end
 
-        if not state.Enabled
-            or state.Halted
-            or game.PlaceId ~= AUTO_JOIN_PLACE_ID
-        then
+        if game.PlaceId ~= AUTO_JOIN_PLACE_ID then
             return true
+        end
+
+        if not state.Enabled then
+            return true
+        end
+
+        if state.Halted then
+            -- Error ไม่ได้แปลว่าได้ Trait เป้าหมายแล้ว
+            return RuntimeFix.isTraitReadyForJoin()
         end
 
         if state.Busy then
@@ -13150,12 +14599,20 @@
         end
 
         if os.clock() < state.RetryAt then
-            return true
+            return RuntimeFix.isTraitReadyForJoin()
         end
 
-        -- ไม่เริ่มโรลระหว่างมีคิวหรือระบบอื่นกำลังแก้ข้อมูลตัวละคร
         if ActiveLobbyQueue then
-            return true
+            if RuntimeFix.isTraitReadyForJoin() then
+                return true
+            end
+
+            -- ยกเลิกคิวเก่าที่หลุดเข้ามาระหว่างโรล
+            if not RuntimeFix.monarchClearQueue() then
+                return false
+            end
+
+            return false
         end
 
         -- อนุญาตให้เจ้าของงานเดิมตรวจ Trait และทำงานต่อ
@@ -13468,7 +14925,7 @@
             )
         end
 
-        return not AutoFarmSession.Cancelled
+        return RuntimeFix.isTraitReadyForJoin()
     end
 
     RuntimeFix.BathCraftRecipes = {
@@ -13971,7 +15428,24 @@
                     return igrisPlan.Target, igrisPlan.Reason
                 end
 
-                return nil, "Evolution and Igris upgrades complete"
+                local trialsTask, needsStorage =
+                    RuntimeFix.getTrialsTask(data)
+
+                if trialsTask then
+                    return nil,
+                        needsStorage
+                            and (trialsTask.Name .. " -> Lobby for Storage")
+                            or (trialsTask.Name .. " -> Lobby for Trials")
+                end
+
+                local evolution =
+                    RuntimeFix.getTrialsEvolutionPlan(data)
+
+                if evolution then
+                    return evolution.Target, evolution.Reason
+                end
+
+                return nil, "Trials characters and Evolution complete"
             end
 
             local recipe = RuntimeFix.MonarchRecipes[currentStage + 1]
@@ -14139,6 +15613,19 @@
             local lastMessageAt = 0
             local nextSendAttempt = 0
 
+            local huntingCharacter = nil
+            local trialsOwnedAtEntry = nil
+
+            local raidCharacters = {
+                spiritedawayraid = "hutao",
+                sololevelingraid = "sung_jinwoo",
+            }
+
+            local function ownsRaidCharacter(data, character)
+                return RuntimeFix.findOwnedSlot(data, character) ~= nil
+                    or RuntimeFix.storageCount(data, character) > 0
+            end
+
             local SETTLE_SECONDS = 2
             local SEND_ERROR_RETRY_SECONDS = 3
             local DEBUG_INTERVAL = 5
@@ -14197,6 +15684,54 @@
 
                         modules = loaded
                         report("Modules ready")
+                    end
+
+                    -- จำเป้าหมายตั้งแต่ยังไม่มีตัว
+                    -- คงค่าไว้หลัง Retry จนกว่าจะได้รับแล้ว Leave
+                    if not huntingCharacter then
+                        local character = raidCharacters[
+                            modules.Maps.currentMap
+                        ]
+
+                        if character then
+                            local data = RuntimeFix.readAccount()
+
+                            if data
+                                and type(data.UnlockedCharacters) == "table"
+                                and type(data.achievements) == "table"
+                                and type(data.achievements.progress) == "table"
+                            then
+                                local stored = RuntimeFix.storageCount(
+                                    data, character
+                                )
+
+                                if stored > 0
+                                    or not ownsRaidCharacter(data, character)
+                                then
+                                    huntingCharacter = character
+                                end
+                            end
+                        end
+                    end
+
+                    if workspace:GetAttribute("Mode") == "trials"
+                        and not trialsOwnedAtEntry
+                    then
+                        local data = RuntimeFix.readAccount()
+
+                        if not data then
+                            report("Waiting for Trials account data")
+                            return
+                        end
+
+                        local snapshot = {}
+
+                        for _, target in ipairs(RuntimeFix.TrialsTargets) do
+                            snapshot[target.Character] =
+                                RuntimeFix.trialsOwns(data, target.Character)
+                        end
+
+                        trialsOwnedAtEntry = snapshot
                     end
 
                     local state = modules.Run.store.state
@@ -14265,6 +15800,22 @@
                     -- Payouts might take a long time or not update on client correctly.
 
 
+                    -- Raid หาตัวละครยังรอยืนยันรางวัลตามเดิม
+                    -- Trials ใช้สถานะจบรอบและ canNext สำหรับเลือก Next Floor
+                    if huntingCharacter then
+                        local payoutStatus = participant.payoutStatus:get()
+                        local materialsAwarded =
+                            participant.materialsAwarded:get()
+
+                        if payoutStatus ~= "completed"
+                            or materialsAwarded ~= true
+                        then
+                            payoutReadyAt = nil
+                            report("Waiting for rewards and character sync")
+                            return
+                        end
+                    end
+
                     -- รอหลัง payout แล้วอ่าน Account สดก่อนตัดสินใจ
                     -- ไม่รอ JSON ของ Account ทั้งก้อนนิ่งอีกต่อไป
                     if not payoutReadyAt then
@@ -14278,6 +15829,68 @@
                     end
 
                     if os.clock() < nextSendAttempt then
+                        return
+                    end
+
+                    if workspace:GetAttribute("Mode") == "trials" then
+                        local data = RuntimeFix.readAccount()
+                        if not data then
+                            report("Waiting for Trials account sync")
+                            return
+                        end
+
+                        local obtained = false
+                        local allOwned = true
+                        local needsStorage = false
+
+                        for _, target in ipairs(RuntimeFix.TrialsTargets) do
+                            local owned, slot = RuntimeFix.trialsOwns(
+                                data, target.Character
+                            )
+
+                            if not owned then
+                                allOwned = false
+                            elseif not slot then
+                                needsStorage = true
+                            end
+
+                            if owned
+                                and trialsOwnedAtEntry
+                                and not trialsOwnedAtEntry[target.Character]
+                            then
+                                obtained = true
+                            end
+                        end
+
+                        local action
+                        local actionName
+
+                        -- Leave เฉพาะตรวจพบตัวเป้าหมายที่ได้ใหม่ในรอบการลงด่านนี้
+                        if obtained then
+                            action = 3
+                            actionName = "LEAVE"
+                        elseif state.canNext:get() == true then
+                            action = 2
+                            actionName = "NEXT FLOOR"
+                        else
+                            action = 1
+                            actionName = "RETRY"
+                        end
+
+                        report(
+                            "Trials Decision: " .. actionName
+                            .. (obtained
+                                and " | Target obtained"
+                                or "")
+                        )
+
+                        nextSendAttempt =
+                            os.clock() + SEND_ERROR_RETRY_SECONDS
+
+                        modules.Packets.endAction:fire(action)
+                        sent = true
+
+                        report("Sent: " .. actionName)
                         return
                     end
 
@@ -14295,6 +15908,37 @@
                     -- ฟังก์ชันเดิมอ่านข้อมูลล่าสุดและเลือกงานถัดไป
                     -- ถ้าอ่านข้อมูลผิดพลาด จะไม่ส่ง Leave โดยเดา
                     local target, reason = RuntimeFix.getNextFarmStage()
+
+                    local huntingAction = nil
+
+                    if huntingCharacter then
+                        local data = RuntimeFix.readAccount()
+
+                        if not data
+                            or type(data.UnlockedCharacters) ~= "table"
+                            or type(data.achievements) ~= "table"
+                            or type(data.achievements.progress) ~= "table"
+                        then
+                            report("Waiting for character/Storage data")
+                            return
+                        end
+
+                        if ownsRaidCharacter(data, huntingCharacter) then
+                            huntingAction = 3
+                            target = nil
+                            reason = "Obtained " .. huntingCharacter
+                                .. " -> Lobby to retrieve/equip"
+                        else
+                            huntingAction = 1
+                            target = {
+                                Map = currentMap,
+                                Chapter = chapter,
+                                Difficulty = difficulty,
+                            }
+                            reason = "Still finding " .. huntingCharacter
+                                .. " -> Retry"
+                        end
+                    end
 
                     -- เหตุผลจาก getNextFarmStage() ในโค้ดเดิม
                     local evoFarmReasons = {
@@ -14322,15 +15966,11 @@
                         or reason == "Hu Tao Money/Gems"
                         or reason == "Hu Tao BathTub resources"
 
-                    local findingHuTao =
-                        reason == "Find Hu Tao in BathTub"
-
                     local isMonarchFarm =
                         reason == "Monarch Story resources"
                         or reason == "Monarch Raid resources"
 
-                    local sameStage = not findingHuTao
-                        and sameMapAndChapter
+                    local sameStage = sameMapAndChapter
                         and (
                             target.Difficulty == difficulty
                             or (
@@ -14341,8 +15981,11 @@
                         )
 
                     -- Retry เล่นซ้ำด้วย Difficulty ของรอบปัจจุบัน
-                    local action = sameStage and 1 or 3
-                    local actionName = sameStage and "RETRY" or "LEAVE"
+                    local action = huntingAction
+                        or (sameStage and 1 or 3)
+
+                    local actionName =
+                        action == 1 and "RETRY" or "LEAVE"
 
                     if sameStage and isEvoFarm then
                         report(string.format(
