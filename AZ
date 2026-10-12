@@ -11759,7 +11759,25 @@
             sunGlassesStatusLabel =
                 addCraftStatusRow("Sun Glasses", 4)
 
-            statusLabel.Visible = false
+            -- เว้นพื้นที่ด้านบนของการ์ดสำหรับงานปัจจุบัน
+            content.Position = UDim2.fromScale(0.5, 0.625)
+            content.Size = UDim2.fromScale(0.95, 0.71)
+
+            statusLabel.Parent = statusCard
+            statusLabel.AnchorPoint = Vector2.new(0.5, 0.5)
+            statusLabel.Position = UDim2.fromScale(0.5, 0.19)
+            statusLabel.Size = UDim2.fromScale(0.92, 0.12)
+            statusLabel.BackgroundTransparency = 1
+            statusLabel.Font = Enum.Font.GothamMedium
+            statusLabel.TextColor3 = Color3.fromRGB(115, 225, 255)
+            statusLabel.TextScaled = true
+            statusLabel.TextWrapped = true
+            statusLabel.RichText = false
+            statusLabel.ZIndex = 5
+            statusLabel.Text = "สถานะ: กำลังตรวจข้อมูล..."
+            statusLabel.Visible = true
+
+            statusLimit.MaxTextSize = 15
 
             toggle.BackgroundColor3 = Color3.fromRGB(26, 24, 43)
             toggle.BackgroundTransparency = 0.08
@@ -12050,7 +12068,224 @@
             return formatCharacterName(characterData.Character)
         end
 
+        local function getCurrentActivityText()
+            if AutoFarmSession.Cancelled then
+                return "หยุดการทำงานแล้ว"
+            end
+
+            local inLobby = game.PlaceId == AUTO_JOIN_PLACE_ID
+
+            if inLobby then
+                if AutoRedeemCodesEnabled then
+                    return "กำลังกรอกโค้ดและตรวจผลรับรางวัล"
+                end
+
+                if AutoUnlockSlotsEnabled then
+                    return "กำลังปลดล็อกช่องตัวละคร"
+                end
+
+                if AutoUpgradeSkillTreeEnabled then
+                    return "กำลังอัปเกรด Skill Tree"
+                end
+
+                if RuntimeFix.StoredPending then
+                    return "กำลังนำตัวละครออกจาก Storage"
+                end
+
+                if CustomAutoRollEnabled then
+                    return "กำลังสุ่มตัวละคร / ตรวจตัวเป้าหมาย"
+                end
+
+                if RuntimeFix.Crafting then
+                    return "กำลังคราฟต์อุปกรณ์"
+                end
+
+                local trait = RuntimeFix.AutoTrait
+                if trait and (trait.Busy or trait.Pending) then
+                    return "กำลังสุ่ม Trait ให้ Sung Jinwoo"
+                end
+
+                local monarch = RuntimeFix.Monarch
+                if monarch and monarch.Pending then
+                    return "กำลัง Evo Sung Jinwoo ขั้น "
+                        .. tostring(monarch.Pending.Stage)
+                        .. " — รอผลยืนยัน"
+                end
+
+                local postEvo = RuntimeFix.PostMonarchEvo
+                if postEvo and postEvo.Pending then
+                    return "กำลัง Evo "
+                        .. tostring(postEvo.Pending.Character)
+                        .. " — รอผลยืนยัน"
+                end
+
+                local igris = RuntimeFix.IgrisAuto
+                if igris and igris.Pending then
+                    return "กำลังอัปเกรด Igris "
+                        .. tostring(igris.Pending.Node)
+                        .. " Lv."
+                        .. tostring(igris.Pending.Level)
+                        .. " — รอผลยืนยัน"
+                end
+
+                if RuntimeFix.PreparingTeam then
+                    return "กำลังจัดทีมและตรวจตัวละครที่สวมใส่"
+                end
+
+                if RuntimeFix.QueueStatus == "teleporting" then
+                    return "กำลังเดินทางเข้าด่าน"
+                end
+            else
+                if RuntimeFix.EndRoundPaused then
+                    return "จบรอบ — กำลังตรวจรางวัลและเลือก Retry / Leave"
+                end
+
+                if RubbleModeActive then
+                    return "กำลังทำลาย Rubble เพื่อไป Area ถัดไป"
+                end
+
+                if IsHealing then
+                    return "กำลังถอยฟื้นฟูเลือด"
+                end
+            end
+
+            -- อ่านเป้าหมายจากระบบเลือกด่านเดิม
+            if type(RuntimeFix.getNextFarmStage) ~= "function" then
+                return "กำลังเริ่มต้นระบบ"
+            end
+
+            local ok, target, reason = pcall(
+                RuntimeFix.getNextFarmStage
+            )
+
+            if not ok then
+                return "กำลังรอข้อมูลเป้าหมายฟาร์ม"
+            end
+
+            reason = tostring(reason or "")
+            local lower = string.lower(reason)
+            local goal
+
+            if lower:find("igris", 1, true)
+                or lower:find("blade lv.", 1, true)
+                or lower:find("speed lv.", 1, true)
+                or lower:find("loyalty lv.", 1, true)
+                or lower:find("command lv.", 1, true)
+            then
+                goal = target
+                    and "หาของ / เงินอัปเกรด Igris"
+                    or "กลับ Lobby เพื่ออัปเกรด Igris"
+
+            elseif lower:find("find hu tao", 1, true) then
+                goal = "หา Hu Tao ใน BathTub"
+
+            elseif lower:find("farm sung jinwoo", 1, true) then
+                goal = "หา Sung Jinwoo ใน Shadow Gate"
+
+            elseif lower:find("storage", 1, true) then
+                goal = "นำตัวละครออกจาก Storage"
+
+            elseif lower:find("craft", 1, true)
+                or lower:find("crown", 1, true)
+                or lower:find("wings", 1, true)
+                or lower:find("scarf", 1, true)
+                or lower:find("glasses", 1, true)
+            then
+                goal = target
+                    and "หาของคราฟต์อุปกรณ์"
+                    or "เตรียมคราฟต์อุปกรณ์"
+
+            elseif lower:find("hu tao", 1, true) then
+                goal = target
+                    and "หาของ / เงิน Evo Hu Tao"
+                    or "เตรียม Evo Hu Tao"
+
+            elseif lower:find("sukuna", 1, true) then
+                goal = target
+                    and "หาของ / เงิน Evo Sukuna"
+                    or "เตรียม Evo Sukuna"
+
+            elseif lower:find("miyabi", 1, true)
+                or lower:find("cataclysm", 1, true)
+            then
+                goal = target
+                    and "หาของ / เงิน Evo Miyabi"
+                    or "เตรียม Evo Miyabi"
+
+            elseif lower:find("katakuri", 1, true)
+                or lower:find("mochi", 1, true)
+            then
+                goal = target
+                    and "หาของ / เงิน Evo Mochi Commander"
+                    or "เตรียม Evo Mochi Commander"
+
+            elseif lower:find("complete", 1, true) then
+                goal = "เป้าหมายปัจจุบันเสร็จแล้ว"
+
+            elseif lower:find("monarch", 1, true) then
+                goal = target
+                    and "หาของ / เงิน Evo Sung Jinwoo"
+                    or "เตรียม Evo Sung Jinwoo"
+
+            else
+                goal = reason ~= "" and reason
+                    or "กำลังตรวจงานถัดไป"
+            end
+
+            if target then
+                local mapNames = {
+                    hxh = "HxH",
+                    sololevelingraid = "Shadow Gate",
+                    spiritedawayraid = "BathTub",
+                }
+
+                local map = mapNames[target.Map]
+                    or tostring(target.Map)
+
+                goal = goal .. " | " .. map
+
+                if target.Map == "hxh" then
+                    goal = goal .. " Chapter "
+                        .. tostring(target.Chapter)
+                end
+            end
+
+            if inLobby then
+                if ActiveLobbyQueue
+                    or RuntimeFix.QueueStatus == "inQuque"
+                then
+                    return "กำลังเข้าคิว — " .. goal
+                end
+
+                return "เตรียมงาน: " .. goal
+            end
+
+            local action
+            if CurrentTarget and isEnemyAlive(CurrentTarget) then
+                action = "กำลังต่อสู้"
+            elseif RuntimeFix.ActiveRootTween then
+                action = "กำลังเคลื่อนที่"
+            elseif AutoFarmEnabled then
+                action = "กำลังรอมอน"
+            else
+                action = "หยุด Auto Farm"
+            end
+
+            return action .. " | เป้าหมาย: " .. goal
+        end
+
         local function refreshStatus()
+            local activityOk, activityText = pcall(
+                getCurrentActivityText
+            )
+
+            statusLabel.Text = "สถานะ: "
+                .. (
+                    activityOk
+                    and activityText
+                    or "กำลังรอข้อมูลระบบ"
+                )
+
             if not levelValueLabel
                 or not moneyValueLabel
                 or not crystalValueLabel
