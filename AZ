@@ -6920,7 +6920,7 @@ end
         {
             Character = "frieren",
             Name = "Silver Calamity",
-            Money = 20000000,
+            Money = 3000000,
             Gems = 25000,
             Materials = {
                 ["101"] = 300,
