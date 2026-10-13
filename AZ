@@ -58,6 +58,7 @@
         },
         Performance = {
             FPSBoost = true,
+            HideSkillEffects = true,
         },
     }
 
@@ -115,6 +116,187 @@
     end
 
     SharedEnv.__AnimeZeroAutoFarmSession = AutoFarmSession
+
+    --==================================================
+    -- Hide Skill Effects | Client
+    --==================================================
+
+do
+    local hiddenEffects = setmetatable({}, { __mode = "k" })
+    local effectConnections = {}
+    local effectsRunning = false
+
+    local function isInsideEffects(instance)
+        local effects = workspace:FindFirstChild("effects")
+
+        return effects ~= nil
+            and instance:IsDescendantOf(effects)
+    end
+
+    local function rememberAndHide(instance, property, value)
+        local record = hiddenEffects[instance]
+
+        if not record then
+            record = {
+                Original = {},
+                Forced = {},
+            }
+            hiddenEffects[instance] = record
+        end
+
+        if record.Original[property] == nil then
+            record.Original[property] = instance[property]
+        end
+
+        record.Forced[property] = value
+
+        if instance[property] ~= value then
+            instance[property] = value
+        end
+    end
+
+    local function hideEffect(instance)
+        if not instance or not instance.Parent then
+            return
+        end
+
+        if instance:GetAttribute("KaiTunOverlayEffect") == true then
+            return
+        end
+
+        if instance:IsA("ParticleEmitter") then
+            rememberAndHide(instance, "Enabled", false)
+            instance:Clear()
+
+        elseif instance:IsA("Trail") then
+            rememberAndHide(instance, "Enabled", false)
+            instance:Clear()
+
+        elseif instance:IsA("Beam")
+            or instance:IsA("Smoke")
+            or instance:IsA("Fire")
+            or instance:IsA("Sparkles")
+            or instance:IsA("Highlight")
+            or instance:IsA("PostEffect")
+        then
+            rememberAndHide(instance, "Enabled", false)
+
+        elseif isInsideEffects(instance) then
+            -- ซ่อนเฉพาะการแสดงผล ไม่แก้ Collision หรือ Joint
+            if instance:IsA("BasePart") then
+                rememberAndHide(
+                    instance,
+                    "LocalTransparencyModifier",
+                    1
+                )
+
+            elseif instance:IsA("Decal")
+                or instance:IsA("Texture")
+            then
+                rememberAndHide(instance, "Transparency", 1)
+
+            elseif instance:IsA("Light") then
+                rememberAndHide(instance, "Enabled", false)
+            end
+        end
+    end
+
+    local function stopHideSkillEffects()
+        effectsRunning = false
+
+        for _, connection in ipairs(effectConnections) do
+            connection:Disconnect()
+        end
+
+        table.clear(effectConnections)
+
+        for instance, record in pairs(hiddenEffects) do
+            if instance.Parent then
+                for property, original in pairs(record.Original) do
+                    pcall(function()
+                        -- คืนค่าเมื่อยังเป็นค่าที่ระบบนี้บังคับไว้
+                        if instance[property] == record.Forced[property] then
+                            instance[property] = original
+                        end
+                    end)
+                end
+            end
+        end
+
+        table.clear(hiddenEffects)
+    end
+
+    local function startHideSkillEffects()
+        if effectsRunning
+            or AutoFarmSession.Cancelled
+            or not AZEnabled("Performance", "HideSkillEffects")
+        then
+            return
+        end
+
+        effectsRunning = true
+
+        local Lighting = game:GetService("Lighting")
+
+        -- ผูกก่อนสแกน เพื่อรับเอฟเฟกต์ที่เกิดระหว่างเริ่มระบบ
+        for _, container in ipairs({ workspace, Lighting }) do
+            table.insert(
+                effectConnections,
+                container.DescendantAdded:Connect(function(instance)
+                    if not effectsRunning or AutoFarmSession.Cancelled then
+                        return
+                    end
+
+                    task.defer(function()
+                        if effectsRunning
+                            and not AutoFarmSession.Cancelled
+                            and instance.Parent
+                        then
+                            pcall(hideEffect, instance)
+                        end
+                    end)
+                end)
+            )
+        end
+
+        task.spawn(function()
+            for _, container in ipairs({ workspace, Lighting }) do
+                for index, instance in ipairs(container:GetDescendants()) do
+                    if not effectsRunning or AutoFarmSession.Cancelled then
+                        return
+                    end
+
+                    pcall(hideEffect, instance)
+
+                    if index % 250 == 0 then
+                        task.wait()
+                    end
+                end
+            end
+
+            while effectsRunning and not AutoFarmSession.Cancelled do
+                if not AZEnabled("Performance", "HideSkillEffects") then
+                    stopHideSkillEffects()
+                    return
+                end
+
+                -- ตรวจเฉพาะรายการที่ซ่อนไว้ ไม่สแกนทั้งแมพซ้ำ
+                for instance in pairs(hiddenEffects) do
+                    if instance.Parent then
+                        pcall(hideEffect, instance)
+                    else
+                        hiddenEffects[instance] = nil
+                    end
+                end
+
+                task.wait(0.2)
+            end
+        end)
+    end
+
+    table.insert(AutoFarmSession.Cleanups, stopHideSkillEffects)
+    startHideSkillEffects()
+end
 
     --==================================================
     -- FPS Boost / Ultra Potato Mode
@@ -3190,7 +3372,24 @@
                         )
 
                         if not returned then
-                            break
+                            -- หยุดเฉพาะเมื่อเป้าหมายหรืองานเดิมสิ้นสุดแล้ว
+                            if RuntimeFix.RubbleRepeatToken ~= token
+                                or AutoFarmSession.Cancelled
+                                or not AutoFarmEnabled
+                                or not RubbleModeActive
+                                or RuntimeFix.EndRoundPaused
+                                or getCharacter() ~= character
+                                or not root.Parent
+                                or not humanoid.Parent
+                                or humanoid.Health <= 0
+                                or RuntimeFix.isRubbleBroken(rubble)
+                            then
+                                break
+                            end
+
+                            -- หินยังไม่พัง: พักแล้วลอง Tween กลับจุดเดิมอีกครั้ง
+                            warn("[AutoFarm] Rubble return incomplete -> retry")
+                            task.wait(0.5)
                         end
                     end
 
@@ -3201,6 +3400,13 @@
             -- Cleanup เฉพาะลูปที่ยังเป็นเจ้าของงาน
             if RuntimeFix.RubbleRepeatToken == token then
                 stopHover()
+
+                -- เปิดทางให้ลูปฟาร์มเริ่ม Hover ใหม่เมื่อระบบพยุงหยุด
+                if CurrentRubble == rubble
+                    and CurrentRubbleArea == tostring(areaName)
+                then
+                    RubbleTeleported = false
+                end
             end
 
             if not ok then
@@ -4113,6 +4319,22 @@
                 "[AutoFarm] Rubble Target:",
                 CurrentRubble:GetFullName()
             )
+        end
+
+        -- เคยไปถึงแล้ว แต่ลูปพยุงหรืออุปกรณ์พยุงหายไป:
+        -- ให้เริ่ม Tween + Hover ใหม่
+        if RubbleTeleported
+            and CurrentRubble
+            and not RuntimeFix.isRubbleBroken(CurrentRubble)
+            and (
+                RuntimeFix.RubbleRepeatToken == nil
+                or not RuntimeFix.RubbleFloatForce
+                or not RuntimeFix.RubbleFloatForce.Parent
+                or not RuntimeFix.RubbleFloatAttachment
+                or not RuntimeFix.RubbleFloatAttachment.Parent
+            )
+        then
+            RubbleTeleported = false
         end
 
         if CurrentRubble
