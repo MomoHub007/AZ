@@ -6920,13 +6920,13 @@ end
         {
             Character = "frieren",
             Name = "Silver Calamity",
-            Money = 3000000,
-            Gems = 25000,
+            Money = 3000000, -- 3M
+            Gems = 11000,   -- 11K
             Materials = {
-                ["101"] = 300,
-                ["103"] = 85,
-                ["108"] = 50,
-                ["110"] = 50,
+                ["101"] = 30, -- Fine Cloth
+                ["103"] = 20, -- Mana Feather
+                ["108"] = 20, -- Soul Fragment
+                ["110"] = 35, -- Magic Pendant
             },
         },
     }
