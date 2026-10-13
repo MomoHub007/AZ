@@ -60,12 +60,21 @@
             FPSBoost = true,
             HideSkillEffects = true,
         },
+        Webhook = {
+            Enabled = true,
+            Url = "ใส่ Discord Webhook URL ของคุณ",
+            SendTest = false,
+        },
     }
 
     local AZUserSettings = SharedEnv.AnimeZeroSettings
 
     if type(AZUserSettings) ~= "table" then
         AZUserSettings = {}
+    end
+
+    if type(AZUserSettings.Webhook) ~= "table" and type(AZDefaults.Webhook) == "table" then
+        AZUserSettings.Webhook = AZDefaults.Webhook
     end
 
     function AZEnabled(section, setting)
@@ -7957,6 +7966,12 @@ end
 
         if not ok then
             state.RetryAt = os.clock() + 5
+            if RuntimeFix.webhookIssue then
+                RuntimeFix.webhookIssue(
+                    "Progression ทำงานล้มเหลว",
+                    "งาน progression เกิด Error ซ้ำ; ตรวจ [Monarch] Action failed ใน executor"
+                )
+            end
             warn("[Monarch] Action failed:", result)
             return false
         end
@@ -8006,6 +8021,28 @@ end
                 warn("[Loader] Teleport reload failed:", err)
             end
         ]], AUTO_SCRIPT_URL)
+
+        if type(AZUserSettings.Webhook) == "table" then
+            bootstrap = string.format([[
+        do
+            local env = typeof(getgenv) == "function" and getgenv() or _G
+            local settings = env.AnimeZeroSettings
+
+            if type(settings) ~= "table" then
+                settings = {}
+            end
+
+            settings.Webhook =
+                game:GetService("HttpService"):JSONDecode(%q)
+
+            env.AnimeZeroSettings = settings
+        end
+    ]],
+                game:GetService("HttpService"):JSONEncode(
+                    AZUserSettings.Webhook
+                )
+            ) .. bootstrap
+        end
 
         local ok, err = pcall(function()
             queueFunction(bootstrap)
@@ -14494,6 +14531,437 @@ end
         return false
     end
 
+    --==================================================
+    -- Discord Webhook | Client
+    --==================================================
+    function RuntimeFix.startWebhook()
+        local HttpService = game:GetService("HttpService")
+
+        local config = AZUserSettings.Webhook
+        local enabled = type(config) == "table"
+            and config.Enabled == true
+
+        local url = enabled and config.Url or ""
+
+        local requestApi =
+            typeof(request) == "function" and request
+            or typeof(http_request) == "function" and http_request
+            or (
+                typeof(syn) == "table"
+                and typeof(syn.request) == "function"
+                and syn.request
+            )
+
+        -- ใช้ warn จริง เพราะไฟล์หลักปิด warn ไว้
+        local log = getfenv().warn
+
+        local validUrl = type(url) == "string"
+            and (
+                url:match("^https://discord%.com/api/webhooks/%d+/[%w_-]+$")
+                or url:match("^https://discord%.com/api/v10/webhooks/%d+/[%w_-]+$")
+            )
+
+        local savePath =
+            "AnimeZeroWebhook_" .. tostring(LocalPlayer.UserId) .. ".json"
+
+        local ledger = SharedEnv.__AnimeZeroWebhookLedger
+
+        if type(ledger) ~= "table" then
+            ledger = {
+                Snapshot = nil,
+                Queue = {},
+                Seen = {},
+            }
+
+            if typeof(readfile) == "function" then
+                local ok, saved = pcall(function()
+                    return HttpService:JSONDecode(readfile(savePath))
+                end)
+
+                if ok
+                    and type(saved) == "table"
+                    and type(saved.Queue) == "table"
+                    and type(saved.Seen) == "table"
+                    and (
+                        saved.Snapshot == nil
+                        or type(saved.Snapshot) == "table"
+                    )
+                then
+                    ledger = saved
+                end
+            end
+        end
+
+        SharedEnv.__AnimeZeroWebhookLedger = ledger
+
+        local issues = {}
+        local nextSendAt = 0
+        local transportStopped = false
+
+        local function save()
+            if typeof(writefile) == "function" then
+                pcall(function()
+                    writefile(savePath, HttpService:JSONEncode(ledger))
+                end)
+            end
+        end
+
+        for index = #ledger.Queue, 1, -1 do
+            local event = ledger.Queue[index]
+            local key = type(event) == "table" and event.Key
+
+            if type(key) ~= "string"
+                or key == "test"
+                or key:match("^issue:")
+                or ledger.Seen[key] == true
+            then
+                table.remove(ledger.Queue, index)
+            end
+        end
+
+        save()
+
+        local function enqueue(key, title, description, color)
+            if not enabled or not validUrl or not requestApi then
+                return
+            end
+
+            if ledger.Seen[key] then
+                return
+            end
+
+            for _, queued in ipairs(ledger.Queue) do
+                if queued.Key == key then
+                    return
+                end
+            end
+
+            -- จำกัดจำนวนข้อความรอส่ง
+            if #ledger.Queue >= 100 then
+                log("[Webhook] Queue full; notification not queued")
+                return
+            end
+
+            table.insert(ledger.Queue, {
+                Key = key,
+                Title = title,
+                Description = description,
+                Color = color or 5763719,
+                Time = os.time(),
+                Attempts = 0,
+            })
+
+            save()
+        end
+
+        function RuntimeFix.webhookIssue(kind, message)
+            -- แจ้งเฉพาะผลสำเร็จ จึงไม่ส่งปัญหา/Timeout เข้า Discord
+            return
+        end
+
+        local unitNames = {
+            sung_jinwoo = "Sung Jinwoo",
+            hutao = "Hu Tao",
+            sukuna = "Sukuna",
+            miyabi = "Miyabi",
+            katakuri = "Mochi Commander",
+            frieren = "Silver Calamity",
+            rin = "Inferno Prince",
+        }
+
+        local accessories = {
+            ["113"] = "Blast Archer Crown",
+            ["114"] = "Blast Archer Wings",
+            ["103"] = "Capsule Scarf",
+            ["105"] = "Sun Glasses",
+        }
+
+        local function snapshot(data)
+            if type(data) ~= "table"
+                or type(data.UnlockedCharacters) ~= "table"
+                or type(data.CharactersData) ~= "table"
+                or type(data.achievements) ~= "table"
+                or type(data.achievements.progress) ~= "table"
+                or type(data.accessory) ~= "table"
+            then
+                return nil
+            end
+
+            local values = {}
+
+            for id in pairs(unitNames) do
+                local slot = RuntimeFix.findOwnedSlot(data, id)
+                local stored = RuntimeFix.storageCount(data, id)
+
+                values["unit:" .. id] = slot ~= nil or stored > 0
+
+                local character = data.CharactersData[id]
+
+                -- ไม่ตีความข้อมูลที่ยังไม่มาเป็นยังไม่ Evo
+                if type(character) == "table"
+                    and type(character.IsUltimateUnlocked) == "boolean"
+                    and id ~= "sung_jinwoo"
+                then
+                    values["evo:" .. id] = character.IsUltimateUnlocked
+                end
+            end
+
+            values.Monarch = RuntimeFix.monarchStage(data)
+
+            local total = 0
+            for _, node in ipairs({ "Blade", "Speed", "Loyalty", "Command" }) do
+                total += RuntimeFix.getIgrisLevel(data, node)
+            end
+            values.Igris = total
+
+            for id in pairs(accessories) do
+                values["craft:" .. id] =
+                    (tonumber(data.accessory[id]) or 0) >= 1
+            end
+
+            local jinwoo = data.CharactersData.sung_jinwoo
+            local traitData = type(jinwoo) == "table" and jinwoo.TraitData
+            local traitId = type(traitData) == "table"
+                and tonumber(traitData.Trait)
+
+            if traitId ~= nil then
+                values.Trait = traitId
+            end
+
+            return values
+        end
+
+        local function inspectAccount()
+            local data = RuntimeFix.readAccount()
+            local current = snapshot(data)
+
+            if not current then
+                return
+            end
+
+            local previous = ledger.Snapshot
+
+            -- ครั้งแรกเก็บฐาน ไม่แจ้งของเก่าทั้งบัญชีซ้ำ
+            if type(previous) ~= "table" then
+                ledger.Snapshot = current
+                save()
+                return
+            end
+
+            for id, name in pairs(unitNames) do
+                if current["unit:" .. id] == true
+                    and previous["unit:" .. id] == false
+                then
+                    enqueue("unit:" .. id, "ได้ตัวละครใหม่", name)
+                end
+
+                if current["evo:" .. id] == true
+                    and previous["evo:" .. id] == false
+                then
+                    enqueue("evo:" .. id, "Evolution สำเร็จ", name)
+                end
+            end
+
+            for stage = (tonumber(previous.Monarch) or 0) + 1, current.Monarch do
+                enqueue(
+                    "monarch:" .. tostring(stage),
+                    "Sung Jinwoo Evo สำเร็จ",
+                    "Monarch Stage " .. tostring(stage) .. "/3"
+                )
+            end
+
+            for id, name in pairs(accessories) do
+                if current["craft:" .. id] == true
+                    and previous["craft:" .. id] == false
+                then
+                    enqueue("craft:" .. id, "คราฟต์สำเร็จ", name)
+                end
+            end
+
+            if current.Trait ~= nil
+                and previous.Trait ~= nil
+                and current.Trait ~= previous.Trait
+                and (current.Trait == 14 or current.Trait == 24)
+            then
+                enqueue(
+                    "trait:sung_jinwoo:" .. tostring(current.Trait),
+                    "ได้ Trait เป้าหมาย",
+                    "Sung Jinwoo | "
+                        .. (current.Trait == 14 and "Supernova" or "Deadeye")
+                )
+            end
+
+            if current.Igris == 20 and previous.Igris ~= 20 then
+                enqueue(
+                    "igris:max",
+                    "Igris อัปเกรดครบ",
+                    "Blade / Speed / Loyalty / Command: 5/5 ทั้งหมด"
+                )
+            end
+
+            -- เก็บค่าที่ข้อมูลยังไม่มาไว้ เพื่อไม่ทำฐานสูญหาย
+            for key, value in pairs(previous) do
+                if current[key] == nil then
+                    current[key] = value
+                end
+            end
+
+            if HttpService:JSONEncode(current)
+                ~= HttpService:JSONEncode(previous)
+            then
+                ledger.Snapshot = current
+                save()
+            end
+
+            local traitState = RuntimeFix.AutoTrait
+            if traitState and traitState.Halted then
+                RuntimeFix.webhookIssue(
+                    "Auto Trait หยุด",
+                    "ระบบ Auto Trait อยู่สถานะ Halted; ตรวจ Error ใน executor"
+                )
+            else
+                issues["Auto Trait หยุด"] = nil
+            end
+        end
+
+        local function sendNext()
+            if transportStopped
+                or ledger.Sending
+                or os.clock() < nextSendAt
+                or #ledger.Queue == 0
+            then
+                return
+            end
+
+            local event = ledger.Queue[1]
+            local level = "รอข้อมูล"
+
+            pcall(function()
+                local data = RuntimeFix.readAccount()
+                local progression = RuntimeFix.requireModule(
+                    ReplicatedStorage,
+                    {"global", "utils", "levelProgression"}
+                )
+                local progress = progression.getProgress(data.currencies.xp)
+                level = tostring(progress.level)
+            end)
+
+            local purpose = "กำลังตรวจงาน"
+            pcall(function()
+                local _, reason = RuntimeFix.getNextFarmStage()
+                purpose = tostring(reason or purpose)
+            end)
+
+            local body = {
+                username = "Zero X | Anime Zero",
+                allowed_mentions = {
+                    parse = {},
+                    users = {},
+                    roles = {},
+                },
+                embeds = {{
+                    title = event.Title,
+                    description = event.Description,
+                    color = event.Color,
+                    timestamp = DateTime.fromUnixTimestamp(event.Time):ToIsoDate(),
+                    fields = {
+                        {
+                            name = "บัญชี",
+                            value = LocalPlayer.Name
+                                .. " (" .. tostring(LocalPlayer.UserId) .. ")",
+                            inline = true,
+                        },
+                        { name = "Level", value = level, inline = true },
+                        { name = "งานปัจจุบัน", value = purpose },
+                        {
+                            name = "Place",
+                            value = tostring(game.PlaceId),
+                            inline = true,
+                        },
+                    },
+                }},
+            }
+
+            ledger.Sending = true
+
+            local ok, response = pcall(requestApi, {
+                Url = url .. "?wait=true",
+                Method = "POST",
+                Headers = { ["Content-Type"] = "application/json" },
+                Body = HttpService:JSONEncode(body),
+            })
+
+            ledger.Sending = false
+            nextSendAt = os.clock() + 3
+
+            local status = ok and type(response) == "table"
+                and tonumber(response.StatusCode) or nil
+
+            if status and status >= 200 and status < 300 then
+                ledger.Seen[event.Key] = true
+                table.remove(ledger.Queue, 1)
+                save()
+                return
+            end
+
+            if status == 429 then
+                local delay = 10
+
+                pcall(function()
+                    local decoded = HttpService:JSONDecode(response.Body)
+                    delay = math.max(1, tonumber(decoded.retry_after) or delay)
+                end)
+
+                nextSendAt = os.clock() + delay
+                return
+            end
+
+            if status == 400 or status == 401
+                or status == 403 or status == 404
+            then
+                transportStopped = true
+                log("[Webhook] Sending stopped | HTTP:", status)
+                return
+            end
+
+            event.Attempts += 1
+            nextSendAt = os.clock() + math.min(60, event.Attempts * 10)
+
+            log("[Webhook] Delivery unconfirmed | HTTP:", status or "unknown")
+            save()
+        end
+
+        if enabled and validUrl and requestApi then
+            task.spawn(function()
+                while not AutoFarmSession.Cancelled do
+                    local ok = pcall(inspectAccount)
+                    if not ok then
+                        log("[Webhook] Account inspection unavailable; retry later")
+                    end
+
+                    task.wait(3)
+                end
+            end)
+
+            task.spawn(function()
+                while not AutoFarmSession.Cancelled do
+                    local ok = pcall(sendNext)
+                    if not ok then
+                        ledger.Sending = false
+                        nextSendAt = os.clock() + 10
+                        log("[Webhook] Sender failed; retry later")
+                    end
+
+                    task.wait(0.5)
+                end
+            end)
+        elseif enabled then
+            log("[Webhook] Check URL and executor request/http_request support")
+        end
+    end
+
+    RuntimeFix.startWebhook()
+
     local LobbyAutoJoinWatcherStarted = false
 
     function startLobbyAutoJoinWatcher()
@@ -14613,6 +15081,16 @@ end
 
                         -- เก็บงานเดิมไว้ให้ลูปถัดไปเรียกใหม่
                         LastLobbyJoinAction = previousAction
+
+                        if RuntimeFix.webhookIssue then
+                            RuntimeFix.webhookIssue(
+                                "Auto Join timeout",
+                                "ยังอยู่ Lobby หลังหมดเวลาคิว"
+                                    .. "\nเป้าหมาย: " .. tostring(previousQueue)
+                                    .. "\nห้องเดิม: " .. tostring(previousRoom)
+                                    .. " → ห้องใหม่: " .. tostring(CurrentLobbyRoomNumber)
+                            )
+                        end
 
                         warn(string.format(
                             "[LobbyWatchdog] Queue timeout -> retry next room"
