@@ -7055,12 +7055,12 @@ end
         {
             Character = "ye_shunguang",
             Name = "Void Arbiter",
-            Money = 25000000,
-            Gems = 50000,
+            Money = 5000000,
+            Gems = 12000,
             Materials = {
-                ["101"] = 250, -- Fine Cloth
-                ["108"] = 150, -- Soul Fragment
-                ["110"] = 100, -- Magic Pendant
+                ["101"] = 50, -- Fine Cloth
+                ["108"] = 30, -- Soul Fragment
+                ["110"] = 50, -- Magic Pendant
             },
         },
     }
