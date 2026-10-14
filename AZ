@@ -48,6 +48,9 @@
         Characters = {
             AutoRoll = true,
             AutoTrait = true,
+            TraitTargets = {
+                "sung_jinwoo",
+            },
             UnlockSlots = true,
             UpgradeSkillTree = true,
         },
@@ -6899,6 +6902,10 @@ end
     end
 
     function RuntimeFix.getTrialsTask(data)
+        if RuntimeFix.trialsEvolutionComplete(data) then
+            return nil, false
+        end
+
         for _, target in ipairs(RuntimeFix.TrialsTargets) do
             local owned, slot = RuntimeFix.trialsOwns(
                 data, target.Character
@@ -7206,9 +7213,10 @@ end
             "frieren",
             "ye_shunguang",
         }) do
+            local owned = RuntimeFix.trialsOwns(data, characterId)
             local character = characters[characterId]
 
-            if not RuntimeFix.findOwnedSlot(data, characterId)
+            if not owned
                 or type(character) ~= "table"
                 or character.IsUltimateUnlocked ~= true
             then
@@ -7476,6 +7484,11 @@ end
         local data = RuntimeFix.readAccount()
         if not data or not RuntimeFix.trialsReady(data) then
             return false
+        end
+
+        -- Evo ครบแล้ว: ไปฟาร์ม Shadow Gate โดยไม่รอรับตัวจาก Storage
+        if RuntimeFix.trialsEvolutionComplete(data) then
+            return RuntimeFix.runCompletedShadowGate()
         end
 
         local target, needsStorage = RuntimeFix.getTrialsTask(data)
@@ -8256,6 +8269,28 @@ end
     ]],
                 game:GetService("HttpService"):JSONEncode(
                     AZUserSettings.Webhook
+                )
+            ) .. bootstrap
+        end
+
+        if type(AZUserSettings.Characters) == "table" then
+            bootstrap = string.format([[
+        do
+            local env = typeof(getgenv) == "function" and getgenv() or _G
+            local settings = env.AnimeZeroSettings
+
+            if type(settings) ~= "table" then
+                settings = {}
+            end
+
+            settings.Characters =
+                game:GetService("HttpService"):JSONDecode(%q)
+
+            env.AnimeZeroSettings = settings
+        end
+    ]],
+                game:GetService("HttpService"):JSONEncode(
+                    AZUserSettings.Characters
                 )
             ) .. bootstrap
         end
@@ -9656,6 +9691,12 @@ end
 
         if not data then
             return false
+        end
+
+        -- Evo ครบแล้ว ไม่ให้การรอรับตัวจาก Storage บล็อก Auto Join
+        if RuntimeFix.trialsEvolutionComplete(data) then
+            RuntimeFix.StoredPending = nil
+            return true
         end
 
         local pending = RuntimeFix.StoredPending
@@ -15564,6 +15605,36 @@ end
     -- Auto Trait: Sung Jinwoo / Hu Tao
     --==================================================
 
+    function RuntimeFix.getConfiguredTraitTargets()
+        local characters = AZUserSettings.Characters
+        local configured = type(characters) == "table"
+            and characters.TraitTargets
+
+        if configured == nil then
+            configured = AZDefaults.Characters.TraitTargets
+        end
+
+        if type(configured) ~= "table" then
+            error("Characters.TraitTargets must be an array of character IDs")
+        end
+
+        local targets = {}
+        local seen = {}
+
+        for index, characterId in ipairs(configured) do
+            if type(characterId) ~= "string" or characterId == "" then
+                error("Invalid TraitTargets entry: " .. tostring(index))
+            end
+
+            if not seen[characterId] then
+                seen[characterId] = true
+                table.insert(targets, characterId)
+            end
+        end
+
+        return targets
+    end
+
     RuntimeFix.AutoTrait = {
         Enabled = AZEnabled("Characters", "AutoTrait"),
         Busy = false,
@@ -15578,9 +15649,7 @@ end
         ResponseTimeout = 10,
         SyncTimeout = 10,
 
-        Targets = {
-            "sung_jinwoo",
-        },
+        Targets = RuntimeFix.getConfiguredTraitTargets(),
 
         KeepTraitIds = {
             [24] = true, -- Deadeye
