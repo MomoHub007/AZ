@@ -7058,6 +7058,88 @@ end
         state.Listening = true
     end
 
+    function RuntimeFix.trialsEvolutionComplete(data)
+        if not data or not RuntimeFix.trialsReady(data) then
+            return false
+        end
+
+        local characters = data.CharactersData
+        local rin = characters and characters.rin
+        local frieren = characters and characters.frieren
+
+        return RuntimeFix.findOwnedSlot(data, "rin") ~= nil
+            and RuntimeFix.findOwnedSlot(data, "frieren") ~= nil
+            and type(rin) == "table"
+            and rin.IsUltimateUnlocked == true
+            and type(frieren) == "table"
+            and frieren.IsUltimateUnlocked == true
+    end
+
+    function RuntimeFix.runCompletedShadowGate()
+        if AutoFarmSession.Cancelled
+            or game.PlaceId ~= AUTO_JOIN_PLACE_ID
+        then
+            return false
+        end
+
+        local data = RuntimeFix.readAccount()
+
+        if not RuntimeFix.trialsEvolutionComplete(data) then
+            return false
+        end
+
+        local queueKey = "Completed_ShadowGate"
+
+        if ActiveLobbyQueue == queueKey
+            and LastLobbyJoinAttemptClock > 0
+            and os.clock() - LastLobbyJoinAttemptClock
+                < LOBBY_JOIN_TIMEOUT_SECONDS
+        then
+            return true
+        end
+
+        local retrying = ActiveLobbyQueue == queueKey
+
+        if not RuntimeFix.monarchClearQueue() then
+            return false
+        end
+
+        if retrying then
+            cycleNextRoomNumber()
+        end
+
+        RuntimeFix.TrialsEvolution.ActiveForEvo = nil
+
+        if not prepareTeam()
+            or AutoFarmSession.Cancelled
+            or not queueScriptOnTeleport()
+        then
+            return false
+        end
+
+        -- การจัดทีมมี yield จึงตรวจ Evo ใหม่ก่อนสร้างคิว
+        if not RuntimeFix.trialsEvolutionComplete(
+            RuntimeFix.readAccount()
+        ) then
+            return false
+        end
+
+        ActiveLobbyQueue = queueKey
+        LastLobbyJoinAttemptClock = os.clock()
+        LastLobbyJoinAction = RuntimeFix.runMonarch
+
+        return RuntimeFix.createQueue({
+            gamemode = "Raid",
+            map = "ShadowGate",
+            chapter = 0,
+            floor = 0,
+            difficulty = 4,
+            maxPlayers = 1,
+            friendsOnly = false,
+            roomNumber = CurrentLobbyRoomNumber,
+        })
+    end
+
     function RuntimeFix.runTrialsEvolution()
         if AutoFarmSession.Cancelled
             or game.PlaceId ~= AUTO_JOIN_PLACE_ID
@@ -7126,17 +7208,7 @@ end
 
         if not plan then
             state.ActiveForEvo = nil
-
-            if not RuntimeFix.monarchClearQueue()
-                or not prepareTeam()
-            then
-                return false
-            end
-
-            RuntimeFix.igrisLog(
-                "Trials Evo complete | Rin Slot1 / Frieren Slot2"
-            )
-            return true
+            return RuntimeFix.runCompletedShadowGate()
         end
 
         if not plan.Target then
@@ -16203,6 +16275,14 @@ end
                 and entry.IsUltimateUnlocked == true
         end
 
+        if RuntimeFix.trialsEvolutionComplete(data) then
+            return {
+                Map = "sololevelingraid",
+                Chapter = 1,
+                Difficulty = 4,
+            }, "Endless Shadow Gate"
+        end
+
         local readyCraft = RuntimeFix.getReadyAccessoryCraft(data)
 
         if readyCraft then
@@ -16871,6 +16951,13 @@ end
                     -- Retry เล่นซ้ำด้วย Difficulty ของรอบปัจจุบัน
                     local action = huntingAction
                         or (sameStage and 1 or 3)
+
+                    -- งานสุดท้าย: อยู่ Shadow Gate แล้วให้ Retry ต่อ
+                    if reason == "Endless Shadow Gate"
+                        and workspace:GetAttribute("Mode") == "sololevelingraid"
+                    then
+                        action = 1
+                    end
 
                     local actionName =
                         action == 1 and "RETRY" or "LEAVE"
