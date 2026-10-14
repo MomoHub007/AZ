@@ -131,99 +131,174 @@
     --==================================================
 
 do
-    local hiddenEffects = setmetatable({}, { __mode = "k" })
-    local effectConnections = {}
-    local effectsRunning = false
+    local records = {}
+    local connections = {}
+    local running = false
 
-    local function isInsideEffects(instance)
-        local effects = workspace:FindFirstChild("effects")
+    local invisibleSequence = NumberSequence.new(1)
+    local zeroSize = NumberSequence.new(0)
 
-        return effects ~= nil
-            and instance:IsDescendantOf(effects)
+    local function isVisualContainer(instance)
+        local current = instance.Parent
+
+        while current and current ~= workspace do
+            if current.Name == "effects"
+                or current.Name == "EmittedPartsUsingPart_icle"
+                or current.Name == "Part_IclesPooled"
+            then
+                return true
+            end
+
+            current = current.Parent
+        end
+
+        return false
     end
 
-    local function rememberAndHide(instance, property, value)
-        local record = hiddenEffects[instance]
+    local function removeRecord(instance)
+        local record = records[instance]
+        if not record then
+            return
+        end
+
+        records[instance] = nil
+
+        for _, connection in ipairs(record.Connections) do
+            connection:Disconnect()
+        end
+    end
+
+    local function lockProperty(instance, property, value)
+        local record = records[instance]
 
         if not record then
             record = {
                 Original = {},
                 Forced = {},
+                Connections = {},
+                Applying = false,
             }
-            hiddenEffects[instance] = record
+
+            records[instance] = record
+
+            table.insert(
+                record.Connections,
+                instance.Destroying:Connect(function()
+                    removeRecord(instance)
+                end)
+            )
         end
 
-        if record.Original[property] == nil then
+        if record.Forced[property] == nil then
             record.Original[property] = instance[property]
-        end
+            record.Forced[property] = value
 
-        record.Forced[property] = value
+            table.insert(
+                record.Connections,
+                instance:GetPropertyChangedSignal(property):Connect(function()
+                    if not running
+                        or AutoFarmSession.Cancelled
+                        or record.Applying
+                        or not instance.Parent
+                    then
+                        return
+                    end
+
+                    record.Applying = true
+
+                    pcall(function()
+                        if instance[property] ~= record.Forced[property] then
+                            instance[property] = record.Forced[property]
+                        end
+                    end)
+
+                    record.Applying = false
+                end)
+            )
+        end
 
         if instance[property] ~= value then
             instance[property] = value
         end
     end
 
-    local function hideEffect(instance)
-        if not instance or not instance.Parent then
-            return
-        end
-
-        if instance:GetAttribute("KaiTunOverlayEffect") == true then
+    local function suppress(instance)
+        if not running
+            or AutoFarmSession.Cancelled
+            or not instance
+            or not instance.Parent
+            or instance:GetAttribute("KaiTunOverlayEffect") == true
+        then
             return
         end
 
         if instance:IsA("ParticleEmitter") then
-            rememberAndHide(instance, "Enabled", false)
+            lockProperty(instance, "Enabled", false)
+
+            -- Emit() ยังทำงานได้ แต่อนุภาคไม่มีภาพให้แสดง
+            lockProperty(instance, "Transparency", invisibleSequence)
+            lockProperty(instance, "Size", zeroSize)
             instance:Clear()
 
         elseif instance:IsA("Trail") then
-            rememberAndHide(instance, "Enabled", false)
+            lockProperty(instance, "Enabled", false)
+            lockProperty(instance, "Transparency", invisibleSequence)
             instance:Clear()
 
-        elseif instance:IsA("Beam")
-            or instance:IsA("Smoke")
+        elseif instance:IsA("Beam") then
+            lockProperty(instance, "Enabled", false)
+            lockProperty(instance, "Transparency", invisibleSequence)
+
+        elseif instance:IsA("Smoke")
             or instance:IsA("Fire")
             or instance:IsA("Sparkles")
             or instance:IsA("Highlight")
             or instance:IsA("PostEffect")
         then
-            rememberAndHide(instance, "Enabled", false)
+            lockProperty(instance, "Enabled", false)
 
-        elseif isInsideEffects(instance) then
-            -- ซ่อนเฉพาะการแสดงผล ไม่แก้ Collision หรือ Joint
+        elseif instance:IsA("ScreenGui") then
+            -- เฉพาะ Flash ที่รายงานยืนยัน ไม่ปิด HUD หรือ UI สคริปต์
+            if instance.Name == "ImpactFx"
+                or instance.Name == "SungJinwooImpact"
+            then
+                lockProperty(instance, "Enabled", false)
+            end
+
+        elseif isVisualContainer(instance) then
             if instance:IsA("BasePart") then
-                rememberAndHide(
-                    instance,
-                    "LocalTransparencyModifier",
-                    1
-                )
+                lockProperty(instance, "LocalTransparencyModifier", 1)
 
             elseif instance:IsA("Decal")
                 or instance:IsA("Texture")
             then
-                rememberAndHide(instance, "Transparency", 1)
+                lockProperty(instance, "Transparency", 1)
 
             elseif instance:IsA("Light") then
-                rememberAndHide(instance, "Enabled", false)
+                lockProperty(instance, "Enabled", false)
             end
         end
     end
 
-    local function stopHideSkillEffects()
-        effectsRunning = false
+    local function stop()
+        running = false
 
-        for _, connection in ipairs(effectConnections) do
+        for _, connection in ipairs(connections) do
             connection:Disconnect()
         end
+        table.clear(connections)
 
-        table.clear(effectConnections)
+        -- ตัด Property Listener ทั้งหมดก่อนคืนค่า
+        for _, record in pairs(records) do
+            for _, connection in ipairs(record.Connections) do
+                connection:Disconnect()
+            end
+        end
 
-        for instance, record in pairs(hiddenEffects) do
+        for instance, record in pairs(records) do
             if instance.Parent then
                 for property, original in pairs(record.Original) do
                     pcall(function()
-                        -- คืนค่าเมื่อยังเป็นค่าที่ระบบนี้บังคับไว้
                         if instance[property] == record.Forced[property] then
                             instance[property] = original
                         end
@@ -232,50 +307,54 @@ do
             end
         end
 
-        table.clear(hiddenEffects)
+        table.clear(records)
     end
 
-    local function startHideSkillEffects()
-        if effectsRunning
-            or AutoFarmSession.Cancelled
-            or not AZEnabled("Performance", "HideSkillEffects")
-        then
-            return
-        end
+    table.insert(AutoFarmSession.Cleanups, stop)
 
-        effectsRunning = true
-
-        local Lighting = game:GetService("Lighting")
-
-        -- ผูกก่อนสแกน เพื่อรับเอฟเฟกต์ที่เกิดระหว่างเริ่มระบบ
-        for _, container in ipairs({ workspace, Lighting }) do
-            table.insert(
-                effectConnections,
-                container.DescendantAdded:Connect(function(instance)
-                    if not effectsRunning or AutoFarmSession.Cancelled then
-                        return
-                    end
-
-                    task.defer(function()
-                        if effectsRunning
-                            and not AutoFarmSession.Cancelled
-                            and instance.Parent
-                        then
-                            pcall(hideEffect, instance)
-                        end
-                    end)
-                end)
-            )
-        end
+    if AZEnabled("Performance", "HideSkillEffects") then
+        running = true
 
         task.spawn(function()
-            for _, container in ipairs({ workspace, Lighting }) do
+            local player = Players.LocalPlayer
+
+            if not player then
+                running = false
+                return
+            end
+
+            local playerGui = player:WaitForChild("PlayerGui", 10)
+
+            if not running or AutoFarmSession.Cancelled then
+                return
+            end
+
+            local containers = {
+                workspace,
+                game:GetService("Lighting"),
+            }
+
+            if playerGui then
+                table.insert(containers, playerGui)
+            end
+
+            -- ผูกก่อนสแกน และซ่อนทันทีเมื่อ Instance เข้าสู่โลก
+            for _, container in ipairs(containers) do
+                table.insert(
+                    connections,
+                    container.DescendantAdded:Connect(function(instance)
+                        pcall(suppress, instance)
+                    end)
+                )
+            end
+
+            for _, container in ipairs(containers) do
                 for index, instance in ipairs(container:GetDescendants()) do
-                    if not effectsRunning or AutoFarmSession.Cancelled then
+                    if not running or AutoFarmSession.Cancelled then
                         return
                     end
 
-                    pcall(hideEffect, instance)
+                    pcall(suppress, instance)
 
                     if index % 250 == 0 then
                         task.wait()
@@ -283,28 +362,18 @@ do
                 end
             end
 
-            while effectsRunning and not AutoFarmSession.Cancelled do
+            -- Property Listener จัดการ Pool/Tween;
+            -- ลูปนี้ใช้ตรวจการปิดตัวเลือกเท่านั้น
+            while running and not AutoFarmSession.Cancelled do
                 if not AZEnabled("Performance", "HideSkillEffects") then
-                    stopHideSkillEffects()
+                    stop()
                     return
                 end
 
-                -- ตรวจเฉพาะรายการที่ซ่อนไว้ ไม่สแกนทั้งแมพซ้ำ
-                for instance in pairs(hiddenEffects) do
-                    if instance.Parent then
-                        pcall(hideEffect, instance)
-                    else
-                        hiddenEffects[instance] = nil
-                    end
-                end
-
-                task.wait(0.2)
+                task.wait(0.5)
             end
         end)
     end
-
-    table.insert(AutoFarmSession.Cleanups, stopHideSkillEffects)
-    startHideSkillEffects()
 end
 
     --==================================================
@@ -3807,33 +3876,53 @@ end
         local originalAim = inputController.getAimPoint
 
         local replacement = function(...)
-            local state = SkillAimState
+            RuntimeFix.AutoAimReadCount =
+                (RuntimeFix.AutoAimReadCount or 0) + 1
 
-            if state
-                and not AutoFarmSession.Cancelled
-                and AutoFarmEnabled
-            then
-                -- ติดตามต่อถ้าสกิลยังทำงาน แม้เวลาสำรองหมดแล้ว
-                local tracking =
-                    isGameSkillBusy()
-                    or os.clock() < state.expires
+            if not AutoFarmSession.Cancelled and AutoFarmEnabled then
+                local state = SkillAimState
 
-                if tracking then
-                    local position = getTrackedAimPosition(state)
+                if state then
+                    local useState =
+                        (
+                            state.worldPosition ~= nil
+                            and RubbleModeActive
+                        )
+                        or (
+                            state.target ~= nil
+                            and state.target == CurrentTarget
+                            and isEnemyAlive(state.target)
+                        )
 
-                    if position then
-                        state.lastValidAim = position
-                        return position
+                    if useState then
+                        local position = getTrackedAimPosition(state)
+
+                        if position then
+                            state.lastValidAim = position
+                            return position
+                        end
                     end
 
-                    -- เป้าหมายตาย/เปลี่ยนระหว่างปล่อยสกิล:
-                    -- คงจุดล่าสุด ป้องกันเป้ากระโดดกลับไปหาเมาส์
-                    if state.lastValidAim then
+                    -- เป้าหมายหายระหว่างร่าย:
+                    -- คงจุดสุดท้ายจนสกิลจบ ไม่กระโดดกลับไปหาเมาส์
+                    if isGameSkillBusy()
+                        and typeof(state.lastValidAim) == "Vector3"
+                    then
                         return state.lastValidAim
+                    end
+                end
+
+                -- แม้เวลาติดตามสำรองหมดแล้ว ยังเล็ง CurrentTarget
+                if CurrentTarget and isEnemyAlive(CurrentTarget) then
+                    local targetRoot = getEnemyRoot(CurrentTarget)
+
+                    if targetRoot and targetRoot.Parent then
+                        return targetRoot.Position
                     end
                 end
             end
 
+            -- ใช้เมาส์จริงเมื่อไม่มีเป้าหมาย หรือปิด Auto Farm
             return originalAim(...)
         end
 
@@ -3852,6 +3941,17 @@ end
         AimPointReplacement = replacement
 
         print("[AutoSkill] Mouse-Free Skill API READY")
+
+        task.delay(10, function()
+            if AutoFarmSession.Cancelled then
+                return
+            end
+
+            getfenv().warn(
+                "[AutoAimCheck] getAimPoint calls:",
+                RuntimeFix.AutoAimReadCount or 0
+            )
+        end)
 
         return DirectCharacterController
     end
@@ -6736,8 +6836,21 @@ end
     end
 
     RuntimeFix.TrialsTargets = {
-        {Character = "frieren", Name = "Silver Calamity", Floor = 50},
-        {Character = "rin", Name = "Inferno Prince", Floor = 125},
+        {
+            Character = "frieren",
+            Name = "Silver Calamity",
+            Floor = 50,
+        },
+        {
+            Character = "rin",
+            Name = "Inferno Prince",
+            Floor = 125,
+        },
+        {
+            Character = "ye_shunguang",
+            Name = "Void Arbiter",
+            Floor = 200,
+        },
     }
 
     function RuntimeFix.getInventorySlotCount()
@@ -6852,6 +6965,7 @@ end
             hutao = true,
             frieren = true,
             rin = true,
+            ye_shunguang = true,
         }
 
         local lowestSlot = nil
@@ -6929,6 +7043,17 @@ end
                 ["110"] = 35, -- Magic Pendant
             },
         },
+        {
+            Character = "ye_shunguang",
+            Name = "Void Arbiter",
+            Money = 25000000,
+            Gems = 50000,
+            Materials = {
+                ["101"] = 250, -- Fine Cloth
+                ["108"] = 150, -- Soul Fragment
+                ["110"] = 100, -- Magic Pendant
+            },
+        },
     }
 
     function RuntimeFix.getTrialsEvolutionPlan(data)
@@ -6955,6 +7080,13 @@ end
 
         -- ลำดับนี้บังคับ Rin ก่อน Frieren
         for _, recipe in ipairs(RuntimeFix.TrialsEvolutionRecipes) do
+            -- Ye ต้องรับจาก Storage เข้า Inventory ก่อน Evo
+            if recipe.Character == "ye_shunguang"
+                and not RuntimeFix.findOwnedSlot(data, "ye_shunguang")
+            then
+                continue
+            end
+
             local character = data.CharactersData[recipe.Character]
 
             if type(character) ~= "table"
@@ -7064,15 +7196,27 @@ end
         end
 
         local characters = data.CharactersData
-        local rin = characters and characters.rin
-        local frieren = characters and characters.frieren
 
-        return RuntimeFix.findOwnedSlot(data, "rin") ~= nil
-            and RuntimeFix.findOwnedSlot(data, "frieren") ~= nil
-            and type(rin) == "table"
-            and rin.IsUltimateUnlocked == true
-            and type(frieren) == "table"
-            and frieren.IsUltimateUnlocked == true
+        if type(characters) ~= "table" then
+            return false
+        end
+
+        for _, characterId in ipairs({
+            "rin",
+            "frieren",
+            "ye_shunguang",
+        }) do
+            local character = characters[characterId]
+
+            if not RuntimeFix.findOwnedSlot(data, characterId)
+                or type(character) ~= "table"
+                or character.IsUltimateUnlocked ~= true
+            then
+                return false
+            end
+        end
+
+        return true
     end
 
     function RuntimeFix.runCompletedShadowGate()
@@ -8245,6 +8389,57 @@ end
                 return false
             end
 
+            local evoState = RuntimeFix.TrialsEvolution
+            local activeForEvo = evoState and evoState.ActiveForEvo
+
+            local preparingTrials =
+                workspace:GetAttribute("Mode") == "trials"
+                or (
+                    RuntimeFix.trialsReady(data)
+                    and RuntimeFix.getTrialsTask(data) ~= nil
+                )
+
+            if preparingTrials and not activeForEvo then
+                if not jinwooSlot then
+                    warn("[PrepareTeam] Trials requires Sung Jinwoo in inventory")
+                    return false
+                end
+
+                -- ใส่ตัวรองก่อน เพื่อย้าย Jinwoo ออกจากช่องรองถ้ามี
+                if hutaoSlot and not equipAndVerify(hutaoSlot, 2) then
+                    return false
+                end
+
+                if not equipAndVerify(jinwooSlot, 1) then
+                    return false
+                end
+
+                if not RuntimeFix.equipPostMonarchActive("sung_jinwoo") then
+                    return false
+                end
+
+                local fresh = RuntimeFix.readAccount()
+                local equipped = fresh and fresh.EquippedCharacterSlots
+
+                if type(equipped) ~= "table"
+                    or tonumber(equipped.Slot1) ~= jinwooSlot
+                    or fresh.character ~= "sung_jinwoo"
+                    or (
+                        hutaoSlot
+                        and tonumber(equipped.Slot2) ~= hutaoSlot
+                    )
+                then
+                    return false
+                end
+
+                print(
+                    "[PrepareTeam] Trials CONFIRMED: Sung Jinwoo Slot1",
+                    hutaoSlot and "| Hu Tao Slot2" or ""
+                )
+
+                return true
+            end
+
             local rinSlot = RuntimeFix.findOwnedSlot(data, "rin")
             local frierenSlot = RuntimeFix.findOwnedSlot(data, "frieren")
 
@@ -8253,24 +8448,32 @@ end
                 and RuntimeFix.trialsReady(data)
             then
                 local evoState = RuntimeFix.TrialsEvolution
-                local evolvingFrieren = evoState
-                    and evoState.ActiveForEvo == "frieren"
+                local evolvingCharacter = evoState and evoState.ActiveForEvo
 
-                local mainSlot = evolvingFrieren
-                    and frierenSlot or rinSlot
+                local evolvingFrieren = evolvingCharacter == "frieren"
+                local evolvingYe = evolvingCharacter == "ye_shunguang"
 
-                local subSlot = evolvingFrieren
-                    and rinSlot or frierenSlot
+                local mainCharacter = evolvingYe and "ye_shunguang"
+                    or (evolvingFrieren and "frieren" or "rin")
 
-                -- จัด Sub ก่อน แล้วค่อยตรวจ Main/Active
+                local mainSlot = evolvingYe
+                    and RuntimeFix.findOwnedSlot(data, "ye_shunguang")
+                    or (evolvingFrieren and frierenSlot or rinSlot)
+
+                local subSlot = evolvingFrieren and rinSlot or frierenSlot
+
+                if not mainSlot then
+                    warn("[PrepareTeam] Evo character not in inventory:", mainCharacter)
+                    return false
+                end
+
+                -- Ye Evo: Ye ช่อง 1 / Frieren ช่อง 2
+                -- หลังยืนยัน Evo ระบบจะคืน Rin ช่อง 1 / Frieren ช่อง 2
                 if not equipAndVerify(subSlot, 2)
                     or not equipAndVerify(mainSlot, 1)
                 then
                     return false
                 end
-
-                local mainCharacter = evolvingFrieren
-                    and "frieren" or "rin"
 
                 if not RuntimeFix.equipPostMonarchActive(mainCharacter) then
                     return false
@@ -9421,6 +9624,7 @@ end
             sung_jinwoo = true,
             frieren = true,
             rin = true,
+            ye_shunguang = true,
         }
 
         -- เลือกช่องแรกที่ปลดล็อกและแทนที่ได้
@@ -9549,6 +9753,7 @@ end
         local isTrialsCharacter =
             character == "frieren"
             or character == "rin"
+            or character == "ye_shunguang"
 
         local targetSlot
 
@@ -9592,6 +9797,7 @@ end
             katakuri = true,
             hutao = true,
             sung_jinwoo = true,
+            ye_shunguang = true,
         }
 
         if isTrialsCharacter then
@@ -9600,6 +9806,7 @@ end
                 hutao = true,
                 frieren = true,
                 rin = true,
+                ye_shunguang = true,
             }
 
             -- ตรวจช่อง Rarity ต่ำสุดใหม่ก่อนส่งคำขอ
@@ -12692,6 +12899,7 @@ end
         local jinwooStatusLabel
         local rinStatusLabel
         local frierenStatusLabel
+        local yeStatusLabel
         local igrisSummaryLabel
         local igrisNodeLabels = {}
 
@@ -13238,12 +13446,17 @@ end
                 createStatusRow(content, "Rin | รอข้อมูล", 0.01, 0.51)
 
             frierenStatusLabel =
-                createStatusRow(content, "Frieren | รอข้อมูล", 0.54, 0.51)
+                createStatusRow(content, "Frieren | รอข้อมูล", 0.345, 0.51)
+
+            yeStatusLabel =
+                createStatusRow(content, "Ye | รอข้อมูล", 0.68, 0.51)
 
             for _, label in ipairs({
-                rinStatusLabel, frierenStatusLabel,
+                rinStatusLabel,
+                frierenStatusLabel,
+                yeStatusLabel,
             }) do
-                label.Size = UDim2.fromScale(0.45, 0.115)
+                label.Size = UDim2.fromScale(0.31, 0.115)
                 label.TextWrapped = true
                 label.TextYAlignment = Enum.TextYAlignment.Top
             end
@@ -13906,6 +14119,14 @@ end
                     data,
                     "frieren",
                     "Frieren"
+                )
+            end
+
+            if yeStatusLabel then
+                yeStatusLabel.Text = getTrialsUnitStatusText(
+                    data,
+                    "ye_shunguang",
+                    "Ye"
                 )
             end
 
@@ -14739,6 +14960,7 @@ end
             katakuri = "Mochi Commander",
             frieren = "Silver Calamity",
             rin = "Inferno Prince",
+            ye_shunguang = "Void Arbiter",
         }
 
         local accessories = {
@@ -16833,30 +17055,38 @@ end
                         local action
                         local actionName
 
-                        -- Leave เฉพาะตรวจพบตัวเป้าหมายที่ได้ใหม่ในรอบการลงด่านนี้
                         if obtained then
                             action = 3
                             actionName = "LEAVE"
+
                         elseif state.canNext:get() == true then
                             action = 2
                             actionName = "NEXT FLOOR"
-                        else
+
+                        elseif status == "failed" then
                             action = 1
                             actionName = "RETRY"
+
+                        else
+                            -- canNext อาจอัปเดตช้ากว่าหน้าจบรอบ
+                            -- รอตรวจใหม่ แทนการรีบโหวต Retry
+                            report("Trials: waiting for Next Floor availability")
+                            return
                         end
 
                         report(
                             "Trials Decision: " .. actionName
-                            .. (obtained
-                                and " | Target obtained"
-                                or "")
+                            .. (obtained and " | Target obtained" or "")
                         )
 
                         nextSendAttempt =
                             os.clock() + SEND_ERROR_RETRY_SECONDS
 
                         modules.Packets.endAction:fire(action)
-                        sent = true
+
+                        -- Trials ตรวจต่อจนรอบใหม่เริ่มหรือ travelStatus เปลี่ยน
+                        -- nextSendAttempt จำกัดการส่งซ้ำไว้ที่ 3 วินาที
+                        sent = false
 
                         report("Sent: " .. actionName)
                         return
