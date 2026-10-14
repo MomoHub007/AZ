@@ -48,9 +48,11 @@
         Characters = {
             AutoRoll = true,
             AutoTrait = true,
+
             TraitTargets = {
                 "sung_jinwoo",
             },
+
             UnlockSlots = true,
             UpgradeSkillTree = true,
         },
@@ -15630,29 +15632,68 @@ end
     --==================================================
 
     function RuntimeFix.getConfiguredTraitTargets()
-        local characters = AZUserSettings.Characters
-        local configured = type(characters) == "table"
-            and characters.TraitTargets
+        local defaults = {
+            "sung_jinwoo",
+        }
 
-        if configured == nil then
-            configured = AZDefaults.Characters.TraitTargets
+        local characters = AZUserSettings.Characters
+        local configured = nil
+
+        -- ใช้ if เพื่อไม่ให้กรณีไม่มี Characters กลายเป็น false
+        if type(characters) == "table" then
+            if characters.AutoTrait == false then
+                return {}
+            end
+
+            configured = characters.TraitTargets
         end
 
-        if type(configured) ~= "table" then
-            error("Characters.TraitTargets must be an array of character IDs")
+        -- รองรับการปิดรายชื่อด้วย false
+        if configured == false then
+            return {}
+        end
+
+        local function report(message)
+            -- ใช้ warn จริง เพราะไฟล์หลักปิด local warn ไว้
+            local logger = getfenv().warn
+
+            if type(logger) == "function" then
+                logger("[AutoTrait Config] " .. message)
+            end
+        end
+
+        if configured == nil then
+            configured = defaults
+        elseif type(configured) ~= "table" then
+            report(
+                "TraitTargets received "
+                    .. type(configured)
+                    .. "; using defaults: sung_jinwoo, rin, ye_shunguang"
+            )
+
+            configured = defaults
         end
 
         local targets = {}
         local seen = {}
 
         for index, characterId in ipairs(configured) do
-            if type(characterId) ~= "string" or characterId == "" then
-                error("Invalid TraitTargets entry: " .. tostring(index))
-            end
+            if type(characterId) == "string" then
+                local cleaned = characterId:match("^%s*(.-)%s*$")
 
-            if not seen[characterId] then
-                seen[characterId] = true
-                table.insert(targets, characterId)
+                if cleaned ~= "" and not seen[cleaned] then
+                    seen[cleaned] = true
+                    table.insert(targets, cleaned)
+                elseif cleaned == "" then
+                    report("Skipped empty entry at index " .. tostring(index))
+                end
+            else
+                report(
+                    "Skipped invalid entry at index "
+                        .. tostring(index)
+                        .. " | Type: "
+                        .. type(characterId)
+                )
             end
         end
 
