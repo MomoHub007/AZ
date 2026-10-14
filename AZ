@@ -13883,8 +13883,32 @@ end
                 end
 
                 local trait = RuntimeFix.AutoTrait
+
                 if trait and (trait.Busy or trait.Pending) then
-                    return "กำลังสุ่ม Trait ให้ Sung Jinwoo"
+                    local pending = trait.Pending
+                    local characterId =
+                        (type(pending) == "table" and pending.Character)
+                        or trait.CurrentCharacter
+
+                    if not characterId then
+                        return "กำลังเตรียมระบบสุ่ม Trait"
+                    end
+
+                    local names = {
+                        sung_jinwoo = "Sung Jinwoo",
+                        rin = "Inferno Prince (Rin)",
+                        ye_shunguang = "Void Arbiter (Ye)",
+                        hutao = "Hu Tao",
+                        frieren = "Silver Calamity (Frieren)",
+                        sukuna = "Sukuna",
+                        miyabi = "Cataclysm (Miyabi)",
+                        katakuri = "Mochi Commander",
+                    }
+
+                    local name = names[characterId]
+                        or formatCharacterName(characterId)
+
+                    return "กำลังสุ่ม Trait ให้ " .. name
                 end
 
                 local monarch = RuntimeFix.Monarch
@@ -16037,6 +16061,9 @@ end
                         return
                     end
 
+                    -- บันทึกตัวที่กำลังสุ่ม รวมช่วงรอก่อนส่งคำขอ
+                    state.CurrentCharacter = characterId
+
                     local waitTime =
                         state.Interval - (os.clock() - state.LastSentAt)
 
@@ -16164,6 +16191,7 @@ end
             end
         end)
 
+        state.CurrentCharacter = nil
         state.Busy = false
 
         if not ok then
