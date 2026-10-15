@@ -652,6 +652,717 @@ end
         return require(instance)
     end
 
+    -- แปลงเฉพาะข้อมูลเป็น Snapshot
+    -- ไม่ส่ง Function หรือ Instance ข้าม Teleport
+    function RuntimeFix.packRuntimeValue(value, seen)
+        local kind = type(value)
+
+        if kind == "string"
+            or kind == "number"
+            or kind == "boolean"
+        then
+            return {
+                Kind = kind,
+                Value = value,
+            }
+        end
+
+        if kind ~= "table" then
+            return nil
+        end
+
+        seen = seen or {}
+
+        if seen[value] then
+            return nil
+        end
+
+        seen[value] = true
+
+        local entries = {}
+
+        for key, item in pairs(value) do
+            if type(key) == "string" or type(key) == "number" then
+                local packed =
+                    RuntimeFix.packRuntimeValue(item, seen)
+
+                if packed then
+                    table.insert(entries, {
+                        Key = key,
+                        Value = packed,
+                    })
+                end
+            end
+        end
+
+        seen[value] = nil
+
+        return {
+            Kind = "table",
+            Entries = entries,
+        }
+    end
+
+    -- คืนชนิดข้อมูลและ Key ตัวเลขให้เหมือน Config ต้นฉบับ
+    function RuntimeFix.unpackRuntimeValue(node)
+        assert(
+            type(node) == "table",
+            "Invalid runtime snapshot node"
+        )
+
+        if node.Kind == "table" then
+            assert(
+                type(node.Entries) == "table",
+                "Invalid runtime snapshot entries"
+            )
+
+            local value = {}
+
+            for _, entry in ipairs(node.Entries) do
+                assert(
+                    type(entry.Key) == "string"
+                        or type(entry.Key) == "number",
+                    "Invalid runtime snapshot key"
+                )
+
+                assert(
+                    value[entry.Key] == nil,
+                    "Duplicate runtime snapshot key"
+                )
+
+                value[entry.Key] =
+                    RuntimeFix.unpackRuntimeValue(entry.Value)
+            end
+
+            return value
+        end
+
+        assert(
+            node.Kind == "string"
+                or node.Kind == "number"
+                or node.Kind == "boolean",
+            "Unsupported runtime snapshot value"
+        )
+
+        assert(
+            type(node.Value) == node.Kind,
+            "Runtime snapshot type mismatch"
+        )
+
+        return node.Value
+    end
+
+    function RuntimeFix.runtimeSnapshotValue(name)
+        -- ใน Lobby ต้องอ่านโมดูลจริง ไม่ใช้สำเนาจากรอบก่อน
+        if game.PlaceId == AUTO_JOIN_PLACE_ID then
+            return nil
+        end
+
+        local snapshot =
+            SharedEnv.__AnimeZeroRuntimeSnapshot
+
+        if type(snapshot) ~= "table"
+            or snapshot.Schema ~= 1
+            or snapshot.SourcePlaceId ~= AUTO_JOIN_PLACE_ID
+            or snapshot.GameId ~= game.GameId
+            or snapshot.UserId ~= LocalPlayer.UserId
+            or type(snapshot.Configs) ~= "table"
+            or type(snapshot.Configs[name]) ~= "table"
+        then
+            return nil
+        end
+
+        local config = RuntimeFix.unpackRuntimeValue(
+            snapshot.Configs[name]
+        )
+
+        assert(
+            type(config) == "table",
+            "Runtime snapshot config is not a table: " .. name
+        )
+
+        return config
+    end
+
+    function RuntimeFix.runtimeConfig(name)
+        RuntimeFix.RuntimeConfigs =
+            RuntimeFix.RuntimeConfigs or {}
+
+        if RuntimeFix.RuntimeConfigs[name] then
+            return RuntimeFix.RuntimeConfigs[name]
+        end
+
+        local function findModule()
+            local assets =
+                ReplicatedStorage:FindFirstChild("assets")
+
+            local configs =
+                assets and assets:FindFirstChild("config")
+
+            if name == "traitConfig" then
+                local traits =
+                    configs and configs:FindFirstChild("Traits")
+
+                return traits
+                    and traits:FindFirstChild("traitConfig")
+            end
+
+            return configs and configs:FindFirstChild(name)
+        end
+
+        local module = findModule()
+
+        if not module then
+            local cached =
+                RuntimeFix.runtimeSnapshotValue(name)
+
+            if cached then
+                RuntimeFix.RuntimeConfigs[name] = cached
+
+                local logger = getfenv().warn
+
+                if type(logger) == "function" then
+                    logger(
+                        "[RuntimeConfig] Using Lobby snapshot:",
+                        name
+                    )
+                end
+
+                return cached
+            end
+
+            -- ไม่มี Snapshot: รอ Replication แบบมีเวลาสิ้นสุด
+            local deadline = os.clock() + 10
+
+            repeat
+                if AutoFarmSession.Cancelled then
+                    error("Runtime config loading cancelled")
+                end
+
+                task.wait(0.2)
+                module = findModule()
+            until module or os.clock() >= deadline
+        end
+
+        assert(
+            module,
+            "[RuntimeConfig] Missing " .. name
+                .. " | PlaceId=" .. tostring(game.PlaceId)
+                .. " | No valid Lobby snapshot."
+                .. " Run the updated script in Lobby before joining."
+        )
+
+        assert(
+            module:IsA("ModuleScript"),
+            "Expected ModuleScript: " .. name
+        )
+
+        local config = require(module)
+
+        assert(
+            type(config) == "table",
+            "Invalid runtime config: " .. name
+        )
+
+        RuntimeFix.RuntimeConfigs[name] = config
+        return config
+    end
+
+    function RuntimeFix.exportRuntimeSnapshot()
+        assert(
+            game.PlaceId == AUTO_JOIN_PLACE_ID,
+            "Runtime snapshot must be captured in Lobby"
+        )
+
+        local configs = {}
+
+        for _, name in ipairs({
+            "evolutionConfig",
+            "MonarchPathConfig",
+            "accessoryConfig",
+            "accessoryCraftConfig",
+            "materialDropConfig",
+            "economyConfig",
+            "characterRollConfig",
+            "traitConfig",
+        }) do
+            configs[name] = RuntimeFix.packRuntimeValue(
+                RuntimeFix.runtimeConfig(name)
+            )
+        end
+
+        return {
+            Schema = 1,
+            SourcePlaceId = game.PlaceId,
+            GameId = game.GameId,
+            UserId = LocalPlayer.UserId,
+            CapturedAt = os.time(),
+            Configs = configs,
+        }
+    end
+
+    function RuntimeFix.parseRuntimeMaterials(text)
+        assert(type(text) == "string", "Material recipe must be a string")
+
+        local materials = {}
+
+        if text:match("^%s*$") then
+            return materials
+        end
+
+        for item in (text .. "|"):gmatch("(.-)|") do
+            local id, rawAmount =
+                item:match("^%s*(%d+)%s*,%s*(%d+)%s*$")
+
+            local amount = tonumber(rawAmount)
+
+            assert(
+                id and amount and amount > 0,
+                "Invalid material recipe: " .. item
+            )
+
+            materials[id] = (materials[id] or 0) + amount
+        end
+
+        return materials
+    end
+
+    function RuntimeFix.runtimeEvolution(characterId, displayName)
+        local entry =
+            RuntimeFix.runtimeConfig("evolutionConfig")[characterId]
+
+        assert(
+            type(entry) == "table",
+            "Evolution config missing: " .. characterId
+        )
+
+        assert(
+            type(entry.currencies) == "table",
+            "Evolution currencies missing: " .. characterId
+        )
+
+        local recipe = {
+            Character = characterId,
+            Name = displayName or characterId,
+            Materials = RuntimeFix.parseRuntimeMaterials(entry.ultimate),
+            Money = 0,
+            Gems = 0,
+        }
+
+        for _, cost in ipairs(entry.currencies) do
+            assert(
+                type(cost) == "table"
+                    and type(cost.amount) == "number"
+                    and cost.amount >= 0,
+                "Invalid evolution currency cost"
+            )
+
+            if cost.currency == "money" then
+                recipe.Money += cost.amount
+            elseif cost.currency == "gems" then
+                recipe.Gems += cost.amount
+            else
+                error(
+                    "Unsupported evolution currency: "
+                        .. tostring(cost.currency)
+                )
+            end
+        end
+
+        return recipe
+    end
+
+    function RuntimeFix.runtimeMonarchRecipes()
+        local stages =
+            RuntimeFix.runtimeConfig("MonarchPathConfig").Stages
+
+        assert(
+            type(stages) == "table" and #stages > 0,
+            "Monarch stages unavailable"
+        )
+
+        local recipes = {}
+
+        for index, stage in ipairs(stages) do
+            assert(type(stage) == "table", "Invalid Monarch stage")
+
+            if stage.Awaken == true then
+                recipes[index] = RuntimeFix.runtimeEvolution(
+                    "sung_jinwoo",
+                    stage.Name
+                )
+            else
+                local currencies = stage.Currencies
+
+                assert(
+                    type(currencies) == "table",
+                    "Monarch currencies unavailable"
+                )
+
+                for key, amount in pairs(currencies) do
+                    assert(
+                        (key == "money" or key == "gems")
+                            and type(amount) == "number"
+                            and amount >= 0,
+                        "Unsupported Monarch currency"
+                    )
+                end
+
+                recipes[index] = {
+                    Materials = RuntimeFix.parseRuntimeMaterials(
+                        stage.Materials
+                    ),
+                    Money = currencies.money or 0,
+                    Gems = currencies.gems or 0,
+                }
+            end
+        end
+
+        return recipes
+    end
+
+    function RuntimeFix.runtimeIgrisRecipes()
+        local tree =
+            RuntimeFix.runtimeConfig("MonarchPathConfig").IgrisTree
+
+        assert(
+            type(tree) == "table"
+                and type(tree.Order) == "table"
+                and type(tree.Nodes) == "table",
+            "Igris tree unavailable"
+        )
+
+        local recipes = {}
+        local order = {}
+
+        for _, nodeKey in ipairs(tree.Order) do
+            local node = tree.Nodes[nodeKey]
+
+            assert(
+                type(node) == "table"
+                    and type(node.Levels) == "table"
+                    and #node.Levels > 0,
+                "Igris levels unavailable: " .. tostring(nodeKey)
+            )
+
+            assert(
+                recipes[nodeKey] == nil,
+                "Duplicate Igris node: " .. tostring(nodeKey)
+            )
+
+            recipes[nodeKey] = {}
+            table.insert(order, nodeKey)
+
+            for level, entry in ipairs(node.Levels) do
+                assert(
+                    type(entry.Money) == "number" and entry.Money >= 0,
+                    "Invalid Igris money cost"
+                )
+
+                recipes[nodeKey][level] = {
+                    Money = entry.Money,
+                    Materials = RuntimeFix.parseRuntimeMaterials(
+                        entry.Materials
+                    ),
+                }
+            end
+        end
+
+        return recipes, order
+    end
+
+    function RuntimeFix.runtimeAccessory(name)
+        RuntimeFix.RuntimeAccessories =
+            RuntimeFix.RuntimeAccessories or {}
+
+        if RuntimeFix.RuntimeAccessories[name] then
+            return RuntimeFix.RuntimeAccessories[name]
+        end
+
+        local accessoryConfig =
+            RuntimeFix.runtimeConfig("accessoryConfig")
+
+        local craftConfig =
+            RuntimeFix.runtimeConfig("accessoryCraftConfig")
+
+        local accessoryId
+        local craftKey
+        local craftEntry
+
+        for id, entry in pairs(accessoryConfig) do
+            if type(entry) == "table" and entry.Name == name then
+                assert(
+                    accessoryId == nil,
+                    "Ambiguous accessory name: " .. name
+                )
+
+                accessoryId = tostring(id)
+            end
+        end
+
+        assert(accessoryId, "Accessory not found: " .. name)
+
+        for key, entry in pairs(craftConfig) do
+            if type(entry) == "table"
+                and tostring(entry.CarftID) == accessoryId
+            then
+                assert(
+                    craftKey == nil,
+                    "Ambiguous craft recipe: " .. name
+                )
+
+                craftKey = tostring(key)
+                craftEntry = entry
+            end
+        end
+
+        assert(craftKey, "Craft recipe not found: " .. name)
+
+        local materials =
+            RuntimeFix.parseRuntimeMaterials(craftEntry.Misc)
+
+        local materialList = {}
+
+        for id, amount in pairs(materials) do
+            table.insert(materialList, {id, amount})
+        end
+
+        table.sort(materialList, function(a, b)
+            return a[1] < b[1]
+        end)
+
+        local recipe = {
+            Id = accessoryId,
+            Index = craftKey,
+            Name = name,
+            Materials = materialList,
+
+            -- รองรับฟังก์ชันเดิมที่ใช้ชื่อฟิลด์ตัวเล็ก
+            accessoryId = accessoryId,
+            craftIndex = craftKey,
+            name = name,
+            materials = materials,
+        }
+
+        RuntimeFix.RuntimeAccessories[name] = recipe
+        return recipe
+    end
+
+    function RuntimeFix.runtimeRarityWeights()
+        local order =
+            RuntimeFix.runtimeConfig("characterRollConfig").rarityOrder
+
+        assert(
+            type(order) == "table" and #order > 0,
+            "Rarity order unavailable"
+        )
+
+        local weights = {}
+
+        for index, name in ipairs(order) do
+            assert(
+                type(name) == "string" and weights[name] == nil,
+                "Invalid rarity order"
+            )
+
+            weights[name] = index
+        end
+
+        return weights
+    end
+
+    function RuntimeFix.runtimeKeepTraitIds()
+        local config = RuntimeFix.runtimeConfig("traitConfig")
+
+        local wanted = {
+            Deadeye = true,
+            Supernova = true,
+        }
+
+        local found = {}
+        local ids = {}
+
+        for _, trait in pairs(config) do
+            if type(trait) == "table" and wanted[trait.Name] then
+                assert(
+                    found[trait.Name] == nil,
+                    "Ambiguous target Trait: " .. trait.Name
+                )
+
+                assert(
+                    type(trait.Id) == "number"
+                        and trait.Enabled ~= false,
+                    "Target Trait unavailable: " .. trait.Name
+                )
+
+                found[trait.Name] = true
+                ids[trait.Id] = true
+            end
+        end
+
+        for name in pairs(wanted) do
+            assert(found[name], "Target Trait not found: " .. name)
+        end
+
+        return ids
+    end
+
+    function RuntimeFix.runtimeRollCost(kind)
+        local economy = RuntimeFix.runtimeConfig("economyConfig")
+        local costs = economy.rollCosts
+
+        local entry =
+            costs and costs.character and costs.character[kind]
+
+        assert(
+            type(entry) == "table"
+                and type(entry.amount) == "number"
+                and entry.amount > 0
+                and type(entry.currency) == "string",
+            "Roll cost unavailable: " .. tostring(kind)
+        )
+
+        local amount = entry.amount
+
+        if kind == "Normal" then
+            local perks = RuntimeFix.requireModule(
+                ReplicatedStorage,
+                {"global", "utils", "GamepassPerks"}
+            )
+
+            assert(
+                type(perks.GetSpinCost) == "function",
+                "GetSpinCost unavailable"
+            )
+
+            amount = perks.GetSpinCost(LocalPlayer, amount)
+        end
+
+        assert(
+            type(amount) == "number" and amount > 0,
+            "Invalid effective roll cost"
+        )
+
+        return {
+            currency = entry.currency,
+            amount = amount,
+        }
+    end
+
+    function RuntimeFix.runtimeMaterialTarget(
+        missing,
+        difficulty,
+        allowedMaps
+    )
+        local tables =
+            RuntimeFix.runtimeConfig("materialDropConfig").Tables
+
+        assert(
+            type(tables) == "table",
+            "materialDropConfig.Tables unavailable"
+        )
+
+        local difficultyNames = {
+            [1] = "Easy",
+            [2] = "Medium",
+            [3] = "Hard",
+            [4] = "Nightmare",
+        }
+
+        assert(
+            difficultyNames[difficulty],
+            "Unsupported difficulty"
+        )
+
+        local candidates = {}
+        local reachable = {}
+
+        for _, map in ipairs({
+            "hxh",
+            "spiritedawayraid",
+            "sololevelingraid",
+        }) do
+            if not allowedMaps or allowedMaps[map] then
+                local chapters = tables[map]
+
+                assert(
+                    type(chapters) == "table",
+                    "Drop table unavailable: " .. map
+                )
+
+                for chapter, drops in pairs(chapters) do
+                    assert(
+                        type(chapter) == "number"
+                            and type(drops) == "table",
+                        "Invalid chapter drops"
+                    )
+
+                    local coverage = 0
+                    local rarest = math.huge
+                    local seen = {}
+
+                    for _, drop in ipairs(drops) do
+                        local id = tostring(drop.Item)
+
+                        if missing[id] and not seen[id] then
+                            local chance = drop.Chance
+
+                            if type(chance) == "table" then
+                                chance = chance[
+                                    difficultyNames[difficulty]
+                                ]
+                            end
+
+                            if type(chance) == "number" and chance > 0 then
+                                seen[id] = true
+                                reachable[id] = true
+                                coverage += 1
+                                rarest = math.min(rarest, chance)
+                            end
+                        end
+                    end
+
+                    if coverage > 0 then
+                        table.insert(candidates, {
+                            Map = map,
+                            Chapter = chapter,
+                            Difficulty = map == "hxh"
+                                and difficulty
+                                or 4,
+                            Coverage = coverage,
+                            Rarest = rarest,
+                        })
+                    end
+                end
+            end
+        end
+
+        for id in pairs(missing) do
+            assert(
+                reachable[tostring(id)],
+                "No supported drop source: material " .. tostring(id)
+            )
+        end
+
+        table.sort(candidates, function(a, b)
+            if a.Coverage ~= b.Coverage then
+                return a.Coverage > b.Coverage
+            end
+
+            if a.Rarest ~= b.Rarest then
+                return a.Rarest < b.Rarest
+            end
+
+            if a.Map ~= b.Map then
+                return a.Map < b.Map
+            end
+
+            return a.Chapter < b.Chapter
+        end)
+
+        return candidates[1]
+    end
+
     function RuntimeFix.getPackets()
         return RuntimeFix.requireModule(
             ReplicatedStorage,
@@ -3989,6 +4700,173 @@ end
     -- Direct Skill Activation (No Keyboard Focus)
     --==================================================
 
+    function RuntimeFix.ensureMouseAimAPI()
+        local patch = RuntimeFix.MouseAimPatch
+
+        if not patch then
+            patch = {
+                NextAttempt = 0,
+            }
+
+            RuntimeFix.MouseAimPatch = patch
+        end
+
+        if patch.Module then
+            return patch.Module.Get == patch.Replacement
+        end
+
+        if AutoFarmSession.Cancelled
+            or os.clock() < patch.NextAttempt
+        then
+            return false
+        end
+
+        patch.NextAttempt = os.clock() + 2
+
+        local scripts =
+            LocalPlayer:FindFirstChild("PlayerScripts")
+
+        local gameFolder =
+            scripts and scripts:FindFirstChild("game")
+
+        local controllers =
+            gameFolder and gameFolder:FindFirstChild("controllers")
+
+        local module =
+            controllers and controllers:FindFirstChild("MouseAim")
+
+        if not module or not module:IsA("ModuleScript") then
+            return false
+        end
+
+        local ok, mouseAim = pcall(require, module)
+
+        if not ok
+            or type(mouseAim) ~= "table"
+            or type(mouseAim.Get) ~= "function"
+        then
+            return false
+        end
+
+        local original = mouseAim.Get
+
+        local function replacement(...)
+            local state = SkillAimState
+            local root = select(1, ...)
+
+            -- ใช้เฉพาะสกิลช่อง 2 ที่ Auto Farm กำลังควบคุม
+            if AutoFarmSession.Cancelled
+                or not AutoFarmEnabled
+                or not state
+                or state.skillKey ~= "2"
+                or root ~= getCharacterRoot()
+            then
+                return original(...)
+            end
+
+            if os.clock() >= state.expires
+                and not isGameSkillBusy()
+            then
+                return original(...)
+            end
+
+            local position = getTrackedAimPosition(state)
+
+            -- เป้าหมายหายระหว่างร่าย ให้คงจุดเล็งล่าสุด
+            if typeof(position) ~= "Vector3" then
+                position = state.lastValidAim
+            end
+
+            if typeof(position) ~= "Vector3" then
+                return original(...)
+            end
+
+            -- รักษาโครงสร้างผลลัพธ์จริงและค่าที่ส่งคืนเพิ่มเติม
+            local results = table.pack(original(...))
+            local result = results[1]
+
+            if type(result) ~= "table" then
+                if not patch.InvalidResultLogged then
+                    patch.InvalidResultLogged = true
+
+                    local logger = getfenv().warn
+
+                    if type(logger) == "function" then
+                        logger(
+                            "[AutoAim] Unexpected MouseAim.Get result:",
+                            typeof(result)
+                        )
+                    end
+                end
+
+                return table.unpack(results, 1, results.n)
+            end
+
+            -- ไม่แก้ตารางต้นฉบับ และไม่สร้าง Hit/Origin ขึ้นมาเอง
+            local aimed = table.clone(result)
+            aimed.Point = position
+            results[1] = aimed
+
+            state.lastValidAim = position
+            state.MouseAimReads = (state.MouseAimReads or 0) + 1
+
+            if not state.MouseAimLogged then
+                state.MouseAimLogged = true
+
+                local logger = getfenv().warn
+
+                if type(logger) == "function" then
+                    logger(
+                        "[AutoAim] Skill 2 -> target:",
+                        position
+                    )
+                end
+            end
+
+            return table.unpack(results, 1, results.n)
+        end
+
+        local assigned, assignError = pcall(function()
+            mouseAim.Get = replacement
+        end)
+
+        if not assigned then
+            local logger = getfenv().warn
+
+            if type(logger) == "function" then
+                logger(
+                    "[AutoAim] MouseAim patch failed:",
+                    assignError
+                )
+            end
+
+            return false
+        end
+
+        patch.Module = mouseAim
+        patch.Original = original
+        patch.Replacement = replacement
+
+        -- คืนฟังก์ชันเดิมเมื่อหยุดหรือรันสคริปต์ใหม่
+        table.insert(AutoFarmSession.Cleanups, function()
+            if mouseAim.Get == replacement then
+                mouseAim.Get = original
+            end
+
+            if RuntimeFix.MouseAimPatch == patch then
+                RuntimeFix.MouseAimPatch = nil
+            end
+        end)
+
+        local logger = getfenv().warn
+
+        if type(logger) == "function" then
+            logger("[AutoAim] MouseAim.Get READY")
+        end
+
+        return true
+    end
+
     local function pressSkillKey(keyCode, worldPosition)
         if AutoFarmSession.Cancelled
             or not AutoFarmEnabled
@@ -4003,6 +4881,10 @@ end
             or keyCode == Enum.KeyCode.Three and 3
 
         if not slot then
+            return false
+        end
+
+        if slot == 2 and not RuntimeFix.ensureMouseAimAPI() then
             return false
         end
 
@@ -4036,6 +4918,7 @@ end
             return false
         end
 
+        state.lastValidAim = position
         SkillAimState = state
 
         -- หันตัวละครให้ตรงมอนสำหรับ Directional Skills
@@ -5296,31 +6179,8 @@ end
     --==================================================
 
     local BLAST_ARCHER_CRAFT_REQUIREMENTS = {
-        Crown = {
-            accessoryId = "113",
-            craftIndex = "13",
-            name = "Blast Archer Crown",
-
-            materials = {
-                ["107"] = 60, -- Broken Blade
-                ["110"] = 8,  -- Magic Pendant
-                ["109"] = 8,  -- SunCore
-                ["111"] = 8,  -- Forbidden Fruit
-            },
-        },
-
-        Wings = {
-            accessoryId = "114",
-            craftIndex = "14",
-            name = "Blast Archer Wings",
-
-            materials = {
-                ["103"] = 80, -- Mana Feather
-                ["110"] = 10, -- Magic Pendant
-                ["109"] = 10, -- SunCore
-                ["111"] = 10, -- Forbidden Fruit
-            },
-        },
+        Crown = RuntimeFix.runtimeAccessory("Blast Archer Crown"),
+        Wings = RuntimeFix.runtimeAccessory("Blast Archer Wings"),
     }
 
     local function getBlastArcherCraftNeeds()
@@ -5332,8 +6192,14 @@ end
 
         local required = {}
 
-        local crownOwned = isAccessoryOwned(data, "113")
-        local wingsOwned = isAccessoryOwned(data, "114")
+        local crownOwned = isAccessoryOwned(
+            data,
+            RuntimeFix.runtimeAccessory("Blast Archer Crown").Id
+        )
+        local wingsOwned = isAccessoryOwned(
+            data,
+            RuntimeFix.runtimeAccessory("Blast Archer Wings").Id
+        )
 
         local targetRecipe = nil
 
@@ -5375,13 +6241,13 @@ end
             crownOwned =
                 isAccessoryOwned(
                     data,
-                    "113"
+                    RuntimeFix.runtimeAccessory("Blast Archer Crown").Id
                 ),
 
             wingsOwned =
                 isAccessoryOwned(
                     data,
-                    "114"
+                    RuntimeFix.runtimeAccessory("Blast Archer Wings").Id
                 ),
         }
     end
@@ -5481,41 +6347,29 @@ end
             return nil
         end
 
-        local missing = status.missing
+        local target = RuntimeFix.runtimeMaterialTarget(
+            status.missing,
+            4,
+            {hxh = true}
+        )
 
-        -- ให้ Broken Blade / SunCore มาก่อน
-        if missing["107"] or missing["109"] then
-            return {
-                name = "HxH Chapter 2 Nightmare",
-                map = "Hxh",
-                chapter = 2,
-                difficulty = 4,
-                queueType = "Story_Hxh_Chapter2_Nightmare",
-            }
+        if not target then
+            return nil
         end
 
-        if missing["110"] then
-            return {
-                name = "HxH Chapter 1 Nightmare",
-                map = "Hxh",
-                chapter = 1,
-                difficulty = 4,
-                queueType = "Story_Hxh_Chapter1_Nightmare",
-            }
-        end
+        return {
+            name = "HxH Chapter "
+                .. target.Chapter
+                .. " Nightmare",
 
-        -- คงเงื่อนไข Chapter 3 ตามโค้ดเดิม
-        if missing["103"] or missing["111"] then
-            return {
-                name = "HxH Chapter 3 Nightmare",
-                map = "Hxh",
-                chapter = 3,
-                difficulty = 4,
-                queueType = "Story_Hxh_Chapter3_Nightmare",
-            }
-        end
+            map = "Hxh",
+            chapter = target.Chapter,
+            difficulty = target.Difficulty,
 
-        return nil
+            queueType = "Story_Hxh_Chapter"
+                .. target.Chapter
+                .. "_Nightmare",
+        }
     end
 
     local AutoJoinStarted = false
@@ -5657,8 +6511,14 @@ end
             return false
         end
 
-        if not isAccessoryOwned(data, "113")
-            or not isAccessoryOwned(data, "114")
+        if not isAccessoryOwned(
+            data,
+            RuntimeFix.runtimeAccessory("Blast Archer Crown").Id
+        )
+            or not isAccessoryOwned(
+                data,
+                RuntimeFix.runtimeAccessory("Blast Archer Wings").Id
+            )
         then
             return false
         end
@@ -6015,8 +6875,14 @@ end
                     return
                 end
 
-                if not isAccessoryOwned(currentData, "113")
-                    or not isAccessoryOwned(currentData, "114")
+                if not isAccessoryOwned(
+                    currentData,
+                    RuntimeFix.runtimeAccessory("Blast Archer Crown").Id
+                )
+                    or not isAccessoryOwned(
+                        currentData,
+                        RuntimeFix.runtimeAccessory("Blast Archer Wings").Id
+                    )
                 then
                     joinBlastArcherMaterialFarm()
                     return
@@ -6025,8 +6891,14 @@ end
                 local finalData = getAccountDataForCraft()
 
                 BlastArcherCraftCompleted = finalData ~= nil
-                    and isAccessoryOwned(finalData, "113")
-                    and isAccessoryOwned(finalData, "114")
+                    and isAccessoryOwned(
+                        finalData,
+                        RuntimeFix.runtimeAccessory("Blast Archer Crown").Id
+                    )
+                    and isAccessoryOwned(
+                        finalData,
+                        RuntimeFix.runtimeAccessory("Blast Archer Wings").Id
+                    )
 
                 AutoCraftBlastArcherEnabled = false
 
@@ -6180,31 +7052,8 @@ end
             and 1 or 0
     end
 
-    RuntimeFix.MonarchRecipes = {
-        {
-            Materials = {
-                ["101"] = 20, ["110"] = 8,
-                ["115"] = 25, ["116"] = 10,
-            },
-            Money = 1000000,
-            Gems = 10000,
-        },
-        {
-            Materials = {
-                ["115"] = 48, ["116"] = 12,
-            },
-            Money = 2400000,
-            Gems = 19000,
-        },
-        {
-            Materials = {
-                ["115"] = 80, ["116"] = 24,
-                ["119"] = 15, ["120"] = 5,
-            },
-            Money = 4000000,
-            Gems = 32000,
-        },
-    }
+    RuntimeFix.MonarchRecipes =
+        RuntimeFix.runtimeMonarchRecipes()
 
     function RuntimeFix.monarchListen(packets)
         local state = RuntimeFix.Monarch
@@ -6330,42 +7179,9 @@ end
     }
 
     RuntimeFix.PostMonarchRecipes = {
-        {
-            Character = "sukuna",
-            Name = "Sukuna",
-            Materials = {},
-            MaterialNames = {
-                ["Fine Cloth"] = 45,
-                ["Eyeball"] = 20,
-                ["Cursed Finger"] = 10,
-                ["Magic Pendant"] = 4,
-            },
-            Money = 0,
-            Gems = 1750,
-        },
-        {
-            Character = "miyabi",
-            Name = "Miyabi",
-            Materials = {
-                ["101"] = 60,
-                ["103"] = 30,
-                ["108"] = 12,
-                ["112"] = 10,
-                ["110"] = 4,
-            },
-            Money = 0,
-            Gems = 3000,
-        },
-        {
-            Character = "katakuri",
-            Name = "Mochi Commander",
-            Materials = {
-                ["117"] = 50,
-                ["118"] = 75,
-            },
-            Money = 1000000,
-            Gems = 25000,
-        },
+        RuntimeFix.runtimeEvolution("sukuna", "Sukuna"),
+        RuntimeFix.runtimeEvolution("miyabi", "Miyabi"),
+        RuntimeFix.runtimeEvolution("katakuri", "Mochi Commander"),
     }
 
     function RuntimeFix.postMonarchLog(message)
@@ -6470,40 +7286,7 @@ end
                     end
                 end
 
-                local target = nil
-
-                if character == "sukuna" then
-                    if next(missing) ~= nil then
-                        target = {
-                            Map = "hxh",
-                            Chapter = 1,
-                            Difficulty = 4,
-                        }
-                    end
-                elseif character == "miyabi" then
-                    if missing["101"]
-                        or missing["108"]
-                        or missing["110"]
-                    then
-                        target = {
-                            Map = "hxh",
-                            Chapter = 1,
-                            Difficulty = 4,
-                        }
-                    elseif missing["103"] or missing["112"] then
-                        target = {
-                            Map = "hxh",
-                            Chapter = 3,
-                            Difficulty = 4,
-                        }
-                    end
-                elseif missing["117"] or missing["118"] then
-                    target = {
-                        Map = "sololevelingraid",
-                        Chapter = 1,
-                        Difficulty = 4,
-                    }
-                end
+                local target = RuntimeFix.runtimeMaterialTarget(missing, 4)
 
                 -- เมื่อของครบแล้ว แต่เงิน/เพชรยังขาด:
                 -- ใช้ Shadow Gate ตามแหล่งฟาร์มเงิน/เพชรเดิม
@@ -6643,59 +7426,8 @@ end
         LastMessage = nil,
     }
 
-    RuntimeFix.IgrisNodeOrder = {
-        "Blade", "Speed", "Loyalty", "Command",
-    }
-
-    -- แต่ละรายการ: Money และ Materials ของระดับถัดไป
-    RuntimeFix.IgrisRecipes = {
-        Blade = {
-            {Money = 100000, Materials = {["115"] = 6}},
-            {Money = 200000, Materials = {["115"] = 10}},
-            {Money = 400000, Materials = {["115"] = 16, ["116"] = 2}},
-            {Money = 700000, Materials = {
-                ["115"] = 24, ["116"] = 4, ["119"] = 3,
-            }},
-            {Money = 1000000, Materials = {
-                ["115"] = 32, ["116"] = 6, ["119"] = 5, ["120"] = 3,
-            }},
-        },
-        Speed = {
-            {Money = 80000, Materials = {["115"] = 5}},
-            {Money = 160000, Materials = {["115"] = 9}},
-            {Money = 320000, Materials = {["115"] = 14, ["116"] = 2}},
-            {Money = 550000, Materials = {
-                ["115"] = 20, ["116"] = 3, ["119"] = 2,
-            }},
-            {Money = 800000, Materials = {
-                ["115"] = 28, ["116"] = 4, ["119"] = 4, ["120"] = 2,
-            }},
-        },
-        Loyalty = {
-            {Money = 70000, Materials = {["115"] = 4, ["116"] = 1}},
-            {Money = 140000, Materials = {["115"] = 7, ["116"] = 1}},
-            {Money = 260000, Materials = {["115"] = 11, ["116"] = 2}},
-            {Money = 420000, Materials = {
-                ["115"] = 16, ["116"] = 3, ["119"] = 2,
-            }},
-            {Money = 650000, Materials = {
-                ["115"] = 22, ["116"] = 4, ["119"] = 3, ["120"] = 1,
-            }},
-        },
-        Command = {
-            {Money = 80000, Materials = {["115"] = 5}},
-            {Money = 160000, Materials = {["115"] = 9, ["119"] = 1}},
-            {Money = 300000, Materials = {
-                ["115"] = 13, ["116"] = 1, ["119"] = 2,
-            }},
-            {Money = 500000, Materials = {
-                ["115"] = 19, ["116"] = 2, ["119"] = 3,
-            }},
-            {Money = 750000, Materials = {
-                ["115"] = 26, ["116"] = 3, ["119"] = 4, ["120"] = 1,
-            }},
-        },
-    }
+    RuntimeFix.IgrisRecipes, RuntimeFix.IgrisNodeOrder =
+        RuntimeFix.runtimeIgrisRecipes()
 
     function RuntimeFix.igrisLog(message)
         local state = RuntimeFix.IgrisAuto
@@ -6720,7 +7452,11 @@ end
         end
 
         local level = tonumber(raw)
-        if not level or level % 1 ~= 0 or level < 0 or level > 5 then
+        if not level
+            or level % 1 ~= 0
+            or level < 0
+            or level > #RuntimeFix.IgrisRecipes[node]
+        then
             error("Invalid Igris level: " .. node)
         end
 
@@ -6744,6 +7480,7 @@ end
         end
 
         local firstMissing = nil
+        local firstMissingMaterials = nil
 
         for _, node in ipairs(RuntimeFix.IgrisNodeOrder) do
             local level = RuntimeFix.getIgrisLevel(data, node)
@@ -6786,16 +7523,27 @@ end
                 plan.Reason = plan.Reason
                     .. " missing: " .. table.concat(missing, ", ")
 
-                firstMissing = firstMissing or plan
+                if not firstMissing then
+                    firstMissing = plan
+                    firstMissingMaterials = {}
+
+                    for id, required in pairs(recipe.Materials) do
+                        if getMaterialAmount(data, id) < required then
+                            firstMissingMaterials[id] = true
+                        end
+                    end
+                end
             end
         end
 
         if firstMissing then
-            firstMissing.Target = {
-                Map = "sololevelingraid",
-                Chapter = 1,
-                Difficulty = 4,
-            }
+            firstMissing.Target =
+                RuntimeFix.runtimeMaterialTarget(firstMissingMaterials, 4)
+                or {
+                    Map = "sololevelingraid",
+                    Chapter = 1,
+                    Difficulty = 4,
+                }
         end
 
         return firstMissing
@@ -6859,10 +7607,7 @@ end
     }
 
     function RuntimeFix.getInventorySlotCount()
-        local config = RuntimeFix.requireModule(
-            ReplicatedStorage,
-            {"assets", "config", "economyConfig"}
-        )
+        local config = RuntimeFix.runtimeConfig("economyConfig")
 
         local count = config and config.characterSlotCount
 
@@ -6942,7 +7687,9 @@ end
         end
 
         for _, node in ipairs(RuntimeFix.IgrisNodeOrder) do
-            if RuntimeFix.getIgrisLevel(data, node) < 5 then
+            if RuntimeFix.getIgrisLevel(data, node)
+                < #RuntimeFix.IgrisRecipes[node]
+            then
                 return false
             end
         end
@@ -6951,23 +7698,14 @@ end
     end
 
     function RuntimeFix.selectTrialsSlot(data)
-        local config = RuntimeFix.requireModule(
-            ReplicatedStorage,
-            {"assets", "config", "characterRollConfig"}
-        )
+        local config = RuntimeFix.runtimeConfig("characterRollConfig")
 
         local rarities = config and config.rarityByCharacter
         if type(rarities) ~= "table" then
             error("characterRollConfig.rarityByCharacter unavailable")
         end
 
-        local weights = {
-            Epic = 1,
-            Legendary = 2,
-            Mythic = 3,
-            Arcane = 4,
-            Zenless = 5,
-        }
+        local weights = RuntimeFix.runtimeRarityWeights()
 
         local protected = {
             sung_jinwoo = true,
@@ -7028,41 +7766,9 @@ end
     }
 
     RuntimeFix.TrialsEvolutionRecipes = {
-        {
-            Character = "rin",
-            Name = "Inferno Prince",
-            Money = 1000000,
-            Gems = 10000,
-            Materials = {
-                ["101"] = 20,
-                ["107"] = 25,
-                ["104"] = 12,
-                ["109"] = 8,
-            },
-        },
-        {
-            Character = "frieren",
-            Name = "Silver Calamity",
-            Money = 3000000, -- 3M
-            Gems = 11000,   -- 11K
-            Materials = {
-                ["101"] = 30, -- Fine Cloth
-                ["103"] = 20, -- Mana Feather
-                ["108"] = 20, -- Soul Fragment
-                ["110"] = 35, -- Magic Pendant
-            },
-        },
-        {
-            Character = "ye_shunguang",
-            Name = "Void Arbiter",
-            Money = 5000000,
-            Gems = 12000,
-            Materials = {
-                ["101"] = 50, -- Fine Cloth
-                ["108"] = 30, -- Soul Fragment
-                ["110"] = 50, -- Magic Pendant
-            },
-        },
+        RuntimeFix.runtimeEvolution("rin", "Inferno Prince"),
+        RuntimeFix.runtimeEvolution("frieren", "Silver Calamity"),
+        RuntimeFix.runtimeEvolution("ye_shunguang", "Void Arbiter"),
     }
 
     function RuntimeFix.getTrialsEvolutionPlan(data)
@@ -7113,34 +7819,11 @@ end
                     end
                 end
 
-                local chapter = nil
+                local target = RuntimeFix.runtimeMaterialTarget(missing, 4)
 
-                if recipe.Character == "rin" then
-                    if missing["101"] or missing["104"] then
-                        chapter = 1
-                    elseif missing["107"] or missing["109"] then
-                        chapter = 2
-                    end
-                else
-                    if missing["101"]
-                        or missing["108"]
-                        or missing["110"]
-                    then
-                        chapter = 1
-                    elseif missing["103"] then
-                        chapter = 3
-                    end
-                end
-
-                local target = nil
-
-                if chapter then
-                    target = {
-                        Map = "hxh",
-                        Chapter = chapter,
-                        Difficulty = 4,
-                    }
-                elseif money < recipe.Money or gems < recipe.Gems then
+                if not target
+                    and (money < recipe.Money or gems < recipe.Gems)
+                then
                     target = {
                         Map = "sololevelingraid",
                         Chapter = 1,
@@ -7459,7 +8142,12 @@ end
 
         RuntimeFix.createQueue({
             gamemode = isStory and "Story" or "Raid",
-            map = isStory and "Hxh" or "ShadowGate",
+            map = isStory and "Hxh"
+                    or (
+                        target.Map == "spiritedawayraid"
+                        and "BathTub"
+                        or "ShadowGate"
+                    ),
             chapter = isStory and target.Chapter or 0,
             floor = 0,
             difficulty = 4,
@@ -7724,12 +8412,22 @@ end
         LastLobbyJoinAttemptClock = os.clock()
         LastLobbyJoinAction = RuntimeFix.runMonarch
 
+        local target = plan.Target
+        local isStory = target.Map == "hxh"
+
         RuntimeFix.createQueue({
-            gamemode = "Raid",
-            map = "ShadowGate",
-            chapter = 0,
+            gamemode = isStory and "Story" or "Raid",
+
+            map = isStory and "Hxh"
+                or (
+                    target.Map == "spiritedawayraid"
+                    and "BathTub"
+                    or "ShadowGate"
+                ),
+
+            chapter = isStory and target.Chapter or 0,
             floor = 0,
-            difficulty = 4,
+            difficulty = target.Difficulty,
             maxPlayers = 1,
             friendsOnly = false,
             roomNumber = CurrentLobbyRoomNumber,
@@ -7911,7 +8609,12 @@ end
 
         RuntimeFix.createQueue({
             gamemode = isStory and "Story" or "Raid",
-            map = isStory and "Hxh" or "ShadowGate",
+            map = isStory and "Hxh"
+                    or (
+                        target.Map == "spiritedawayraid"
+                        and "BathTub"
+                        or "ShadowGate"
+                    ),
             chapter = isStory and target.Chapter or 0,
             difficulty = target.Difficulty,
             maxPlayers = 1,
@@ -8027,19 +8730,22 @@ end
             return false
         end
 
-        local needStory = false
-        local needRaid = false
+        local missingMaterials = {}
 
         for id, required in pairs(recipe.Materials) do
-            local current = tonumber(materials[id]) or 0
-            if current < required then
-                if id == "101" or id == "110" then
-                    needStory = true
-                else
-                    needRaid = true
-                end
+            if getMaterialAmount(data, id) < required then
+                missingMaterials[id] = true
             end
         end
+
+        local runtimeTarget =
+            RuntimeFix.runtimeMaterialTarget(missingMaterials, 4)
+
+        local needStory =
+            runtimeTarget ~= nil and runtimeTarget.Map == "hxh"
+
+        local needRaid =
+            runtimeTarget ~= nil and runtimeTarget.Map ~= "hxh"
 
         local money = tonumber(currencies.money)
         local gems = tonumber(currencies.gems)
@@ -8161,8 +8867,16 @@ end
 
         RuntimeFix.createQueue({
             gamemode = needStory and "Story" or "Raid",
-            map = needStory and "Hxh" or "ShadowGate",
-            chapter = needStory and 1 or 0,
+            map = needStory and "Hxh"
+                or (
+                    runtimeTarget
+                    and runtimeTarget.Map == "spiritedawayraid"
+                    and "BathTub"
+                    or "ShadowGate"
+                ),
+            chapter = needStory
+                and (runtimeTarget and runtimeTarget.Chapter or 1)
+                or 0,
             difficulty = 4, -- Nightmare สำหรับฟาร์ม Evo Jinwoo
             maxPlayers = 1,
             friendsOnly = false,
@@ -8296,6 +9010,21 @@ end
                 )
             ) .. bootstrap
         end
+
+        local snapshotJson =
+            game:GetService("HttpService"):JSONEncode(
+                RuntimeFix.exportRuntimeSnapshot()
+            )
+
+        bootstrap = string.format([[
+    do
+        local env =
+            typeof(getgenv) == "function" and getgenv() or _G
+
+        env.__AnimeZeroRuntimeSnapshot =
+            game:GetService("HttpService"):JSONDecode(%q)
+    end
+]], snapshotJson) .. bootstrap
 
         local ok, err = pcall(function()
             queueFunction(bootstrap)
@@ -8690,8 +9419,14 @@ end
             return false
         end
 
-        if isAccessoryOwned(accessoryData, "113")
-            and isAccessoryOwned(accessoryData, "114")
+        if isAccessoryOwned(
+            accessoryData,
+            RuntimeFix.runtimeAccessory("Blast Archer Crown").Id
+        )
+            and isAccessoryOwned(
+                accessoryData,
+                RuntimeFix.runtimeAccessory("Blast Archer Wings").Id
+            )
             and RuntimeFix.canFarmRaid()
         then
             return joinShadowGateRaid()
@@ -9499,7 +10234,7 @@ end
         end
 
         if characterSlotNumber == nil then
-            for slotNumber = 1, 11 do
+            for slotNumber = 1, RuntimeFix.getInventorySlotCount() do
                 local slot =
                     unlockedCharacters["Slot" .. slotNumber]
 
@@ -9993,8 +10728,14 @@ end
         local craftData = getAccountDataForCraft()
 
         if not craftData
-            or not isAccessoryOwned(craftData, "113")
-            or not isAccessoryOwned(craftData, "114")
+            or not isAccessoryOwned(
+                craftData,
+                RuntimeFix.runtimeAccessory("Blast Archer Crown").Id
+            )
+            or not isAccessoryOwned(
+                craftData,
+                RuntimeFix.runtimeAccessory("Blast Archer Wings").Id
+            )
         then
             print("[AutoEvolve] Waiting for Crown + Wings.")
             return false
@@ -10060,122 +10801,67 @@ end
             return false
         end
 
-        local requiredMaterials = {
-            ["Fine Cloth"] = 45,
-            ["Eyeball"] = 20,
-            ["Cursed Finger"] = 10,
-            ["Magic Pendant"] = 4,
-        }
-        local currentMaterials = {
-            ["Fine Cloth"] = 0,
-            ["Eyeball"] = 0,
-            ["Cursed Finger"] = 0,
-            ["Magic Pendant"] = 0,
-        }
+        local recipe =
+            RuntimeFix.runtimeEvolution("sukuna", "Sukuna")
 
-        for id, entry in pairs(materials) do
-            local config = materialConfig[tostring(id)]
-
-            if config and config.Name then
-                local materialName = tostring(config.Name)
-
-                if currentMaterials[materialName] ~= nil then
-                    local amount = entry
-
-                    if type(entry) == "table" then
-                        amount =
-                            entry.Amount
-                            or entry.amount
-                            or entry.Count
-                            or entry.count
-                            or entry.Value
-                            or entry.value
-                    end
-
-                    currentMaterials[materialName] =
-                        tonumber(amount) or 0
-                end
-            end
-        end
-
-        local currencies = data.currencies
-        local gems =
-            type(currencies) == "table"
-            and (tonumber(currencies.gems) or 0)
-            or 0
-
-        print(
-            "[AutoEvolve] Materials | Fine Cloth:",
-            currentMaterials["Fine Cloth"],
-            "| Eyeball:",
-            currentMaterials["Eyeball"],
-            "| Cursed Finger:",
-            currentMaterials["Cursed Finger"],
-            "| Magic Pendant:",
-            currentMaterials["Magic Pendant"],
-            "| Gems:",
-            gems
-        )
-
-        for materialName, requiredAmount in pairs(requiredMaterials) do
-            local currentAmount = currentMaterials[materialName]
-
-            if currentAmount < requiredAmount then
-                print(
-                    "[AutoEvolve] Not enough",
-                    materialName,
-                    "| Have:",
-                    currentAmount,
-                    "| Need:",
-                    requiredAmount
-                )
-
+        for id, required in pairs(recipe.Materials) do
+            if getMaterialAmount(data, id) < required then
                 return false
             end
         end
 
-        if gems < 1750 then
-            print(
-                "[AutoEvolve] Not enough Gems | Have:",
-                gems,
-                "| Need: 1750"
-            )
+        local currencies = data.currencies
 
+        if type(currencies) ~= "table" then
             return false
         end
 
-        print("[AutoEvolve] Sukuna materials and Gems COMPLETE")
+        local money = tonumber(currencies.money)
+        local gems = tonumber(currencies.gems)
 
-        local event =
-            ReplicatedStorage:FindFirstChild("EvolveCharacter")
-
-        if not event then
-            warn("[AutoEvolve] ReplicatedStorage.EvolveCharacter not found")
+        if not money
+            or not gems
+            or money < recipe.Money
+            or gems < recipe.Gems
+        then
             return false
         end
 
-        if not event:IsA("RemoteEvent") then
-            warn("[AutoEvolve] EvolveCharacter is not RemoteEvent")
+        if not RuntimeFix.equipPostMonarchActive("sukuna") then
             return false
         end
 
-        local bytes = {
-            115,
-            117,
-            107,
-            117,
-            110,
-            97,
-            6,
-        }
-        local packet = buffer.create(#bytes)
+        local fresh = RuntimeFix.readAccount()
 
-        for i, value in ipairs(bytes) do
-            buffer.writeu8(packet, i - 1, value)
+        if not fresh or fresh.character ~= "sukuna" then
+            return false
         end
+
+        for id, required in pairs(recipe.Materials) do
+            if getMaterialAmount(fresh, id) < required then
+                return false
+            end
+        end
+
+        local funds = fresh.currencies
+
+        if not funds
+            or (tonumber(funds.money) or 0) < recipe.Money
+            or (tonumber(funds.gems) or 0) < recipe.Gems
+        then
+            return false
+        end
+
+        local packets = RuntimeFix.getPackets()
+
+        assert(
+            packets.evolveCharacter
+                and type(packets.evolveCharacter.fire) == "function",
+            "evolveCharacter packet unavailable"
+        )
 
         local fireOk, fireError = pcall(function()
-            event:FireServer(packet)
+            packets.evolveCharacter:fire("sukuna")
         end)
 
         if not fireOk then
@@ -10194,14 +10880,10 @@ end
     local HutaoEvolveRetryAt = 0
 
     function getHutaoEvoStatus()
-        local ok, data, materialConfig = pcall(function()
-            local accountNamespace = require(ReplicatedStorage.global.stores.accountNamespace)
-            local matConfig = require(ReplicatedStorage.assets.config.materialConfig)
-            return accountNamespace.getLocalPlayerAccount():toTable(), matConfig
-        end)
+        local data = RuntimeFix.readAccount()
 
-        if not ok or type(data) ~= "table" then
-            return { isReady = false, missingStage = nil }
+        if not data then
+            return {isReady = false}
         end
 
         if not RuntimeFix.findOwnedSlot(data, "hutao") then
@@ -10212,77 +10894,81 @@ end
                 }
             end
 
-            -- ยังไม่มี Hu Tao: ฟาร์มตัวจาก BathTub ก่อน
-            -- แม้เครื่อง Evo จาก Raid จะครบแล้วก็ยังต้องหาตัวต่อ
             return {
                 isReady = false,
                 acquiringCharacter = true,
                 missingStage = "Raid_BathTub",
+
+                RuntimeTarget = {
+                    Map = "spiritedawayraid",
+                    Chapter = 1,
+                    Difficulty = 4,
+                },
             }
         end
 
-        local hutaoData = data.CharactersData and data.CharactersData.hutao
-        if hutaoData and hutaoData.IsUltimateUnlocked == true then
-            return { isReady = false, isEvolved = true }
+        local character =
+            data.CharactersData and data.CharactersData.hutao
+
+        if type(character) == "table"
+            and character.IsUltimateUnlocked == true
+        then
+            return {
+                isReady = false,
+                isEvolved = true,
+            }
         end
 
-        local materials = data.material
-        local counts = {
-            ["101"] = 0, -- Fine Cloth (need 20)
-            ["110"] = 0, -- Magic Pendant (need 8)
-            ["113"] = 0, -- Ghost (need 25)
-            ["114"] = 0, -- Staff of Homa (need 10)
-        }
+        local recipe =
+            RuntimeFix.runtimeEvolution("hutao", "Hu Tao")
 
-        if type(materials) == "table" then
-            local entries = materials.entries or materials
-            for id, amount in pairs(entries) do
-                local sId = tostring(id)
-                if counts[sId] ~= nil then
-                    local num = amount
-                    if type(amount) == "table" then
-                        num = amount.Amount or amount.amount or amount.Count or amount.count or amount.Value or amount.value or 0
-                    end
-                    counts[sId] = tonumber(num) or 0
-                end
+        local missing = {}
+        local counts = {}
+
+        for id, required in pairs(recipe.Materials) do
+            local amount = getMaterialAmount(data, id)
+
+            counts[id] = amount
+
+            if amount < required then
+                missing[id] = true
             end
         end
 
-        local currencies = data.currencies or {}
-        local money = tonumber(currencies.money) or 0
-        local gems = tonumber(currencies.gems) or 0
+        local currencies = data.currencies
 
-        print(string.format("[AutoEvoHutao] Materials -> Staff of Homa: %d/10 | Ghost: %d/25 | Magic Pendant: %d/8 | Fine Cloth: %d/20 | Money: %d/1M | Gems: %d/10K",
-            counts["114"], counts["113"], counts["110"], counts["101"], money, gems
-        ))
+        assert(
+            type(currencies) == "table",
+            "Hu Tao currencies unavailable"
+        )
 
-        local needHoma = counts["114"] < 10
-        local needGhost = counts["113"] < 25
-        local needPendant = counts["110"] < 8
-        local needCloth = counts["101"] < 20
-        local needCurrency = (money < 1000000) or (gems < 10000)
+        local money = tonumber(currencies.money)
+        local gems = tonumber(currencies.gems)
 
-        if not needHoma and not needGhost and not needPendant and not needCloth and not needCurrency then
-            return { isReady = true, counts = counts }
+        assert(money and gems, "Hu Tao money/gems unavailable")
+
+        local needCurrency =
+            money < recipe.Money or gems < recipe.Gems
+
+        local target =
+            RuntimeFix.runtimeMaterialTarget(missing, 4)
+
+        if not target and needCurrency then
+            target = {
+                Map = "spiritedawayraid",
+                Chapter = 1,
+                Difficulty = 4,
+            }
         end
 
-        -- Priority of stage routing:
-        -- 1. Spirited Away Raid (Bathtub) for Staff of Homa & Ghost
-        if needHoma or needGhost then
-            return { isReady = false, missingStage = "Raid_BathTub" }
-        end
-
-        -- 2. Story Hxh Chapter 1 Nightmare for Magic Pendant & Fine Cloth
-        if needPendant then
-            return { isReady = false, missingStage = "Story_Hxh_Nightmare" }
-        end
-
-        -- 3. Fine Cloth fallback (Story Chapter 3)
-        if needCloth then
-            return { isReady = false, missingStage = "Story_Hxh_Chapter3" }
-        end
-
-        return { isReady = false, missingStage = nil, needCurrency = true }
+        return {
+            isReady = target == nil,
+            counts = counts,
+            Recipe = recipe,
+            needCurrency = needCurrency,
+            RuntimeTarget = target,
+            missingStage = target and "RuntimeMaterial" or nil,
+        }
     end
 
     function fireEvolveHutao(): boolean
@@ -10449,6 +11135,52 @@ end
         end
 
         local status = getHutaoEvoStatus()
+
+        if status.RuntimeTarget then
+            local target = status.RuntimeTarget
+
+            if target.Map ~= "hxh" and not RuntimeFix.canFarmRaid() then
+                return false
+            end
+
+            if target.Map == "spiritedawayraid"
+                and not RuntimeFix.ensureBathAccessories()
+            then
+                return true
+            end
+
+            if not queueScriptOnTeleport() then
+                return false
+            end
+
+            local isStory = target.Map == "hxh"
+
+            ActiveLobbyQueue =
+                "HuTao_Runtime_" .. target.Map .. "_" .. target.Chapter
+
+            LastLobbyJoinAction = joinHutaoEvoFarm
+            LastLobbyJoinAttemptClock = os.clock()
+
+            RuntimeFix.createQueue({
+                gamemode = isStory and "Story" or "Raid",
+
+                map = isStory and "Hxh"
+                    or (
+                        target.Map == "spiritedawayraid"
+                        and "BathTub"
+                        or "ShadowGate"
+                    ),
+
+                chapter = isStory and target.Chapter or 0,
+                floor = 0,
+                difficulty = target.Difficulty,
+                maxPlayers = 4,
+                friendsOnly = false,
+                roomNumber = CurrentLobbyRoomNumber,
+            })
+
+            return true
+        end
 
         if status.waitingForStorage then
             return true
@@ -10855,7 +11587,7 @@ end
 
             print("[AutoUnlock] START | Unlock slots 2-11 when affordable.")
 
-            for slot = 2, 11 do
+            for slot = 2, RuntimeFix.getInventorySlotCount() do
                 if AutoFarmSession.Cancelled then
                     break
                 end
@@ -11154,7 +11886,7 @@ end
                 local isUnlocked = false
                 local unlockedCharacters = currentData.UnlockedCharacters
                 if type(unlockedCharacters) == "table" then
-                    for slotNumber = 1, 11 do
+                    for slotNumber = 1, RuntimeFix.getInventorySlotCount() do
                         local slot = unlockedCharacters["Slot" .. slotNumber]
                         if slot and slot.Unlocked == true then
                             local cName = string.lower(tostring(slot.Character or ""))
@@ -11294,7 +12026,7 @@ end
             local configs = skillTreeConfig.characters
 
             -- เก็บทุก Class ในช่องที่ปลดล็อก โดยไม่อัปตัวซ้ำ
-            for slotNumber = 1, 11 do
+            for slotNumber = 1, RuntimeFix.getInventorySlotCount() do
                 local slot = type(data.UnlockedCharacters) == "table"
                     and data.UnlockedCharacters["Slot" .. slotNumber]
 
@@ -11629,7 +12361,7 @@ end
             while CustomAutoRollEnabled do
                 local chosenSlot = nil
 
-                for slotNumber = 1, 11 do
+                for slotNumber = 1, RuntimeFix.getInventorySlotCount() do
                     local slotFrame =
                         characterSlots:FindFirstChild("Slot" .. slotNumber)
 
@@ -12043,7 +12775,8 @@ end
                 return
             end
 
-            local AUTO_ROLL_COST = 500
+            local AUTO_ROLL_COST =
+                RuntimeFix.runtimeRollCost("Normal").amount
             local AUTO_ROLL_SUKUNA = "sukuna"
             local AUTO_ROLL_STOP_AND_NEXT = {
                 miyabi = true,
@@ -12405,7 +13138,7 @@ end
                 "| Money Cost: $500"
             )
 
-            for slotNumber = 1, 11 do
+            for slotNumber = 1, RuntimeFix.getInventorySlotCount() do
                 if not CustomAutoRollEnabled or AutoFarmSession.Cancelled then
                     break
                 end
@@ -12497,18 +13230,27 @@ end
                         slotNumber
                     )
 
+                    local luckyCost = RuntimeFix.runtimeRollCost("Lucky")
+                    local diceCost = RuntimeFix.runtimeRollCost("NormalDice")
+                    local normalCost = RuntimeFix.runtimeRollCost("Normal")
+
+                    AUTO_ROLL_COST = normalCost.amount
+
                     local spinType
                     local paymentCurrency
 
-                    if resources.luckySpins > 0 then
+                    if (resources[luckyCost.currency] or 0) >= luckyCost.amount then
                         spinType = "Lucky"
-                        paymentCurrency = "luckySpins"
-                    elseif resources.rolls > 0 then
+                        paymentCurrency = luckyCost.currency
+
+                    elseif (resources[diceCost.currency] or 0) >= diceCost.amount then
                         spinType = "Normal"
-                        paymentCurrency = "rolls"
-                    elseif resources.money >= AUTO_ROLL_COST then
+                        paymentCurrency = diceCost.currency
+
+                    elseif (resources[normalCost.currency] or 0) >= normalCost.amount then
                         spinType = "Normal"
-                        paymentCurrency = "money"
+                        paymentCurrency = normalCost.currency
+
                     else
                         finish(
                             "Lucky Spins, Normal Rolls, and Money are exhausted -> Join Story"
@@ -12778,9 +13520,13 @@ end
                     return
                 end
 
-                if resources.luckySpins <= 0
-                    and resources.rolls <= 0
-                    and resources.money < AUTO_ROLL_COST
+                local luckyCost = RuntimeFix.runtimeRollCost("Lucky")
+                local diceCost = RuntimeFix.runtimeRollCost("NormalDice")
+                local normalCost = RuntimeFix.runtimeRollCost("Normal")
+
+                if (resources[luckyCost.currency] or 0) < luckyCost.amount
+                    and (resources[diceCost.currency] or 0) < diceCost.amount
+                    and (resources[normalCost.currency] or 0) < normalCost.amount
                 then
                     finish("ALL RESOURCES EXHAUSTED -> Join Story")
 
@@ -12953,21 +13699,11 @@ end
         local sunGlassesStatusLabel
 
         local extraCraftDisplay = {
-            CapsuleScarf = {
-                accessoryId = "103",
-                materials = {
-                    ["101"] = 16,
-                    ["102"] = 6,
-                },
-            },
+            CapsuleScarf =
+                RuntimeFix.runtimeAccessory("Capsule Scarf"),
 
-            SunGlasses = {
-                accessoryId = "105",
-                materials = {
-                    ["101"] = 20,
-                    ["106"] = 8,
-                },
-            },
+            SunGlasses =
+                RuntimeFix.runtimeAccessory("SunGlasses"),
         }
 
         -- อยู่แยกจาก Background เพื่อให้เปิดกลับได้หลังซ่อน
@@ -15632,68 +16368,53 @@ end
     --==================================================
 
     function RuntimeFix.getConfiguredTraitTargets()
-        local defaults = {
-            "sung_jinwoo",
-        }
-
         local characters = AZUserSettings.Characters
         local configured = nil
 
-        -- ใช้ if เพื่อไม่ให้กรณีไม่มี Characters กลายเป็น false
         if type(characters) == "table" then
-            if characters.AutoTrait == false then
-                return {}
-            end
-
             configured = characters.TraitTargets
         end
 
-        -- รองรับการปิดรายชื่อด้วย false
+        if configured == nil then
+            configured = AZDefaults.Characters.TraitTargets
+        end
+
         if configured == false then
             return {}
         end
 
-        local function report(message)
-            -- ใช้ warn จริง เพราะไฟล์หลักปิด local warn ไว้
+        if type(configured) ~= "table" then
+            if type(characters) ~= "table" then
+                characters = {}
+                AZUserSettings.Characters = characters
+            end
+
+            characters.AutoTrait = false
+
             local logger = getfenv().warn
 
             if type(logger) == "function" then
-                logger("[AutoTrait Config] " .. message)
+                logger(
+                    "[AutoTrait Config] Invalid TraitTargets;"
+                        .. " AutoTrait disabled for this run"
+                )
             end
-        end
 
-        if configured == nil then
-            configured = defaults
-        elseif type(configured) ~= "table" then
-            report(
-                "TraitTargets received "
-                    .. type(configured)
-                    .. "; using defaults: sung_jinwoo, rin, ye_shunguang"
-            )
-
-            configured = defaults
+            return {}
         end
 
         local targets = {}
         local seen = {}
 
         for index, characterId in ipairs(configured) do
-            if type(characterId) == "string" then
-                local cleaned = characterId:match("^%s*(.-)%s*$")
+            assert(
+                type(characterId) == "string" and characterId ~= "",
+                "Invalid TraitTargets entry: " .. tostring(index)
+            )
 
-                if cleaned ~= "" and not seen[cleaned] then
-                    seen[cleaned] = true
-                    table.insert(targets, cleaned)
-                elseif cleaned == "" then
-                    report("Skipped empty entry at index " .. tostring(index))
-                end
-            else
-                report(
-                    "Skipped invalid entry at index "
-                        .. tostring(index)
-                        .. " | Type: "
-                        .. type(characterId)
-                )
+            if not seen[characterId] then
+                seen[characterId] = true
+                table.insert(targets, characterId)
             end
         end
 
@@ -15701,6 +16422,7 @@ end
     end
 
     RuntimeFix.AutoTrait = {
+        Targets = RuntimeFix.getConfiguredTraitTargets(),
         Enabled = AZEnabled("Characters", "AutoTrait"),
         Busy = false,
         Halted = false,
@@ -15714,12 +16436,7 @@ end
         ResponseTimeout = 10,
         SyncTimeout = 10,
 
-        Targets = RuntimeFix.getConfiguredTraitTargets(),
-
-        KeepTraitIds = {
-            [24] = true, -- Deadeye
-            [14] = true, -- Supernova
-        },
+        KeepTraitIds = RuntimeFix.runtimeKeepTraitIds(),
     }
 
     function RuntimeFix.isTraitReadyForJoin()
@@ -16249,24 +16966,8 @@ end
     end
 
     RuntimeFix.BathCraftRecipes = {
-        {
-            Id = "103",
-            Index = "3",
-            Name = "Capsule Scarf",
-            Materials = {
-                {"101", 16},
-                {"102", 6},
-            },
-        },
-        {
-            Id = "105",
-            Index = "5",
-            Name = "Sun Glasses",
-            Materials = {
-                {"101", 20},
-                {"106", 8},
-            },
-        },
+        RuntimeFix.runtimeAccessory("Capsule Scarf"),
+        RuntimeFix.runtimeAccessory("SunGlasses"),
     }
 
     -- อ่านอย่างเดียว ใช้ทั้งใน Lobby และระบบ Retry
@@ -16368,7 +17069,14 @@ end
 
                 queueScriptOnTeleport()
 
-                local queueKey = "BathCraft_Hxh1"
+                local target = RuntimeFix.getBathFarmTarget(data)
+
+                assert(
+                    target and target.Map == "hxh",
+                    "Bath craft Story target unavailable"
+                )
+
+                local queueKey = "BathCraft_Hxh" .. target.Chapter
                 ActiveLobbyQueue = queueKey
                 LastLobbyJoinAction = autoJoinBestAvailableStory
                 LastLobbyJoinAttemptClock = os.clock()
@@ -16377,7 +17085,7 @@ end
                     RuntimeFix.createQueue({
                         gamemode = "Story",
                         map = "Hxh",
-                        chapter = 1,
+                        chapter = target.Chapter,
                         difficulty = difficulty,
                         maxPlayers = 4,
                         friendsOnly = false,
@@ -16422,14 +17130,24 @@ end
                 return nil, recipe.Name .. " materials complete -> Lobby to craft"
             end
 
-            return {
-                Map = "hxh",
-                Chapter = 1,
-                Difficulty = math.max(
-                    2,
-                    RuntimeFix.getStoryDifficulty(4, true)
-                ),
-            }, "BathTub accessory materials"
+            local missing = {}
+
+            for _, material in ipairs(recipe.Materials) do
+                if getMaterialAmount(data, material[1]) < material[2] then
+                    missing[material[1]] = true
+                end
+            end
+
+            local difficulty = math.max(
+                2,
+                RuntimeFix.getStoryDifficulty(4, true)
+            )
+
+            return RuntimeFix.runtimeMaterialTarget(
+                missing,
+                difficulty,
+                {hxh = true}
+            ), "BathTub accessory materials"
         end
 
         return {
@@ -16526,7 +17244,24 @@ end
                 return true
             end
 
-            if status.missingStage == "Story_Hxh_Nightmare" then
+            if status.RuntimeTarget then
+                local target = status.RuntimeTarget
+
+                gamemode = target.Map == "hxh" and "Story" or "Raid"
+
+                map = target.Map == "hxh" and "Hxh"
+                    or (
+                        target.Map == "spiritedawayraid"
+                        and "BathTub"
+                        or "ShadowGate"
+                    )
+
+                chapter = target.Map == "hxh" and target.Chapter or 0
+
+                queueKey =
+                    "HuTao_Runtime_" .. target.Map .. "_" .. target.Chapter
+
+            elseif status.missingStage == "Story_Hxh_Nightmare" then
                 gamemode = "Story"
                 map = "Hxh"
                 chapter = 1
@@ -16654,9 +17389,15 @@ end
         if RuntimeFix.canFarmRaid() then
             local craftRecipe = nil
 
-            if not isAccessoryOwned(data, "113") then
+            if not isAccessoryOwned(
+                data,
+                RuntimeFix.runtimeAccessory("Blast Archer Crown").Id
+            ) then
                 craftRecipe = BLAST_ARCHER_CRAFT_REQUIREMENTS.Crown
-            elseif not isAccessoryOwned(data, "114") then
+            elseif not isAccessoryOwned(
+                data,
+                RuntimeFix.runtimeAccessory("Blast Archer Wings").Id
+            ) then
                 craftRecipe = BLAST_ARCHER_CRAFT_REQUIREMENTS.Wings
             end
 
@@ -16691,24 +17432,46 @@ end
                 ), "Crown/Wings materials"
             end
 
-            if not isAccessoryOwned(data, "103")
-                or not isAccessoryOwned(data, "105")
+            if not isAccessoryOwned(
+                data,
+                RuntimeFix.runtimeAccessory("Capsule Scarf").Id
+            )
+                or not isAccessoryOwned(
+                    data,
+                    RuntimeFix.runtimeAccessory("SunGlasses").Id
+                )
             then
                 return RuntimeFix.getBathFarmTarget(data)
             end
         end
 
         local allAccessoriesOwned =
-            isAccessoryOwned(data, "113") -- Crown
-            and isAccessoryOwned(data, "114") -- Wings
-            and isAccessoryOwned(data, "103") -- Capsule Scarf
-            and isAccessoryOwned(data, "105") -- Sun Glasses
+            isAccessoryOwned(
+                data,
+                RuntimeFix.runtimeAccessory("Blast Archer Crown").Id
+            ) -- Crown
+            and isAccessoryOwned(
+                data,
+                RuntimeFix.runtimeAccessory("Blast Archer Wings").Id
+            ) -- Wings
+            and isAccessoryOwned(
+                data,
+                RuntimeFix.runtimeAccessory("Capsule Scarf").Id
+            ) -- Capsule Scarf
+            and isAccessoryOwned(
+                data,
+                RuntimeFix.runtimeAccessory("SunGlasses").Id
+            ) -- Sun Glasses
 
         if allAccessoriesOwned
             and RuntimeFix.canFarmRaid()
             and not evolved("hutao")
         then
             local status = getHutaoEvoStatus()
+
+            if status.RuntimeTarget then
+                return status.RuntimeTarget, "Hu Tao runtime resources"
+            end
 
             if status.waitingForStorage then
                 return nil, "Hu Tao in Storage -> Lobby to retrieve"
@@ -16781,18 +17544,22 @@ end
                 error("Monarch recipe unavailable")
             end
 
-            local needStory = false
-            local needRaid = false
+            local missingMaterials = {}
 
             for id, required in pairs(recipe.Materials) do
                 if getMaterialAmount(data, id) < required then
-                    if id == "101" or id == "110" then
-                        needStory = true
-                    else
-                        needRaid = true
-                    end
+                    missingMaterials[id] = true
                 end
             end
+
+            local runtimeTarget =
+                RuntimeFix.runtimeMaterialTarget(missingMaterials, 4)
+
+            local needStory =
+                runtimeTarget ~= nil and runtimeTarget.Map == "hxh"
+
+            local needRaid =
+                runtimeTarget ~= nil and runtimeTarget.Map ~= "hxh"
 
             local money = tonumber(data.currencies.money)
             local gems = tonumber(data.currencies.gems)
@@ -16808,8 +17575,16 @@ end
                 return nil, "Monarch resources complete -> Lobby for Evo"
             end
 
+            if runtimeTarget and RuntimeFix.canFarmRaid() then
+                return runtimeTarget, "Monarch runtime materials"
+            end
+
             if needStory or not RuntimeFix.canFarmRaid() then
-                return stage("hxh", 1, 4),
+                return stage(
+                    "hxh",
+                    runtimeTarget and runtimeTarget.Chapter or 1,
+                    4
+                ),
                     "Monarch Story resources"
             end
 
@@ -16825,9 +17600,15 @@ end
         if carrySlot or hasSukuna or hutaoEvolved then
             local recipe
 
-            if not isAccessoryOwned(data, "113") then
+            if not isAccessoryOwned(
+                data,
+                RuntimeFix.runtimeAccessory("Blast Archer Crown").Id
+            ) then
                 recipe = BLAST_ARCHER_CRAFT_REQUIREMENTS.Crown
-            elseif not isAccessoryOwned(data, "114") then
+            elseif not isAccessoryOwned(
+                data,
+                RuntimeFix.runtimeAccessory("Blast Archer Wings").Id
+            ) then
                 recipe = BLAST_ARCHER_CRAFT_REQUIREMENTS.Wings
             end
 
@@ -16867,6 +17648,10 @@ end
         then
             local status = getHutaoEvoStatus()
 
+            if status.RuntimeTarget then
+                return status.RuntimeTarget, "Hu Tao runtime resources"
+            end
+
             if status.isReady then
                 return nil, "Hu Tao resources complete -> Lobby for Evo"
             end
@@ -16891,8 +17676,14 @@ end
         end
 
         -- หา Jinwoo หลังอุปกรณ์ครบ ตามสิทธิ์ Shadow Gate เดิม
-        if isAccessoryOwned(data, "113")
-            and isAccessoryOwned(data, "114")
+        if isAccessoryOwned(
+            data,
+            RuntimeFix.runtimeAccessory("Blast Archer Crown").Id
+        )
+            and isAccessoryOwned(
+                data,
+                RuntimeFix.runtimeAccessory("Blast Archer Wings").Id
+            )
             and RuntimeFix.canFarmRaid()
         then
             if RuntimeFix.storageCount(data, "sung_jinwoo") > 0 then
@@ -16945,7 +17736,6 @@ end
             local trialsOwnedAtEntry = nil
 
             local raidCharacters = {
-                spiritedawayraid = "hutao",
                 sololevelingraid = "sung_jinwoo",
             }
 
@@ -16966,7 +17756,12 @@ end
                 then
                     lastMessage = message
                     lastMessageAt = now
-                    print("[AutoEnd] " .. message)
+
+                    local logger = getfenv().warn
+
+                    if type(logger) == "function" then
+                        logger("[AutoEnd] " .. message)
+                    end
                 end
             end
 
@@ -17017,9 +17812,12 @@ end
                     -- จำเป้าหมายตั้งแต่ยังไม่มีตัว
                     -- คงค่าไว้หลัง Retry จนกว่าจะได้รับแล้ว Leave
                     if not huntingCharacter then
-                        local character = raidCharacters[
-                            modules.Maps.currentMap
-                        ]
+                        local mode = workspace:GetAttribute("Mode")
+
+                        local map = raidCharacters[mode] and mode
+                            or modules.Maps.currentMap
+
+                        local character = raidCharacters[map]
 
                         if character then
                             local data = RuntimeFix.readAccount()
@@ -17073,9 +17871,10 @@ end
                     end
 
                     local screen = PlayerGui:FindFirstChild("EndScreen")
-                    local showing = screen
+                    local showing = (screen
                         and screen:IsA("ScreenGui")
-                        and screen.Enabled == true
+                        and screen.Enabled == true)
+                        or PlayerGui:GetAttribute("EndScreenActive") == true
 
                     local status = participant.status:get()
 
@@ -17124,22 +17923,34 @@ end
                         ))
                         return
                     end
-                    -- The actual EndScreen only checks if travelStatus == "idle".
-                    -- Payouts might take a long time or not update on client correctly.
 
+                    local mode = workspace:GetAttribute("Mode")
 
-                    -- Raid หาตัวละครยังรอยืนยันรางวัลตามเดิม
-                    -- Trials ใช้สถานะจบรอบและ canNext สำหรับเลือก Next Floor
-                    if huntingCharacter then
-                        local payoutStatus = participant.payoutStatus:get()
-                        local materialsAwarded =
-                            participant.materialsAwarded:get()
+                    -- Raid/BathTub ยืนยันรางวัลเฉพาะรอบที่ชนะ (รอบ failed ไม่มี payout ให้รอ)
+                    if status ~= "failed"
+                        and (huntingCharacter or mode == "spiritedawayraid")
+                    then
+                        local payoutStatus = participant.payoutStatus
+                            and participant.payoutStatus:get()
+                        local materialsAwarded = participant.materialsAwarded
+                            and participant.materialsAwarded:get()
 
-                        if payoutStatus ~= "completed"
-                            or materialsAwarded ~= true
-                        then
+                        -- Anime Zero ตั้งค่า payoutStatus เป็น "paid" หรือ materialsAwarded = true เมื่อแจกรางวัลเสร็จ
+                        local payoutDone = payoutStatus == "paid"
+                            or payoutStatus == "completed"
+                            or materialsAwarded == true
+
+                        if not payoutDone then
                             payoutReadyAt = nil
-                            report("Waiting for rewards and character sync")
+                            report(string.format(
+                                "Waiting rewards | Mode=%s | Character=%s"
+                                    .. " | payoutStatus=%s"
+                                    .. " | materialsAwarded=%s",
+                                tostring(mode or "Unknown"),
+                                tostring(huntingCharacter),
+                                tostring(payoutStatus),
+                                tostring(materialsAwarded)
+                            ))
                             return
                         end
                     end
@@ -17230,7 +18041,11 @@ end
                         return
                     end
 
-                    local currentMap = modules.Maps.currentMap
+                    mode = workspace:GetAttribute("Mode") or mode
+
+                    local currentMap = (mode and mode ~= "" and mode)
+                        or (raidCharacters[mode] and mode)
+                        or modules.Maps.currentMap
                     local chapter = tonumber(state.chapter:get())
                     local difficulty = tonumber(state.difficulty:get())
 
@@ -17241,10 +18056,8 @@ end
                         error("Current map/chapter/difficulty unavailable")
                     end
 
-                    -- ฟังก์ชันเดิมอ่านข้อมูลล่าสุดและเลือกงานถัดไป
-                    -- ถ้าอ่านข้อมูลผิดพลาด จะไม่ส่ง Leave โดยเดา
-                    local target, reason = RuntimeFix.getNextFarmStage()
-
+                    local target = nil
+                    local reason = nil
                     local huntingAction = nil
 
                     if huntingCharacter then
@@ -17259,21 +18072,32 @@ end
                             return
                         end
 
-                        if ownsRaidCharacter(data, huntingCharacter) then
+                        if huntingCharacter == "hutao" then
                             huntingAction = 3
                             target = nil
+                            reason = "Hu Tao hunt -> Leave after match"
+
+                        elseif ownsRaidCharacter(data, huntingCharacter) then
+                            huntingAction = 3
+                            target = nil
+
                             reason = "Obtained " .. huntingCharacter
                                 .. " -> Lobby to retrieve/equip"
                         else
                             huntingAction = 1
+
                             target = {
                                 Map = currentMap,
                                 Chapter = chapter,
                                 Difficulty = difficulty,
                             }
+
                             reason = "Still finding " .. huntingCharacter
                                 .. " -> Retry"
                         end
+                    else
+                        -- เรียกตัวเลือกงานทั่วไปเฉพาะเมื่อไม่ได้กำลังหาตัวละคร
+                        target, reason = RuntimeFix.getNextFarmStage()
                     end
 
                     -- เหตุผลจาก getNextFarmStage() ในโค้ดเดิม
@@ -17293,7 +18117,10 @@ end
 
                     local sameMapAndChapter = target ~= nil
                         and target.Map == currentMap
-                        and target.Chapter == chapter
+                        and (
+                            raidCharacters[currentMap] ~= nil
+                            or target.Chapter == chapter
+                        )
 
                     local isHuTaoEvoFarm =
                         reason == "Hu Tao Magic Pendant"
@@ -17327,10 +18154,18 @@ end
                         action = 1
                     end
 
-                    local actionName =
-                        action == 1 and "RETRY" or "LEAVE"
+                    -- ดัน BathTub: จบรอบแล้วต้อง LEAVE กลับ Lobby เสมอ
+                    if mode == "spiritedawayraid" or currentMap == "spiritedawayraid" then
+                        action = 3
+                        target = nil
+                        reason = "BathTub Raid finished -> Leave to Lobby"
+                    end
 
-                    if sameStage and isEvoFarm then
+                    local actionName =
+                        action == 1 and "RETRY"
+                        or (action == 2 and "NEXT FLOOR" or "LEAVE")
+
+                    if sameStage and isEvoFarm and action == 1 then
                         report(string.format(
                             "Evo materials still needed -> RETRY"
                             .. " | Map=%s | Chapter=%d | Difficulty=%d",
@@ -17362,9 +18197,12 @@ end
 
                     modules.Packets.endAction:fire(action)
 
-                    -- ตั้งหลัง fire สำเร็จเท่านั้น
-                    -- ไม่ส่งโหวตซ้ำระหว่างรอผู้เล่นคนอื่น
-                    sent = true
+                    -- หากเป็น LEAVE อนุญาตให้ส่งซ้ำหากผ่านไป 3 วิแล้วยังอยู่ที่เดิม
+                    if action == 3 then
+                        sent = false
+                    else
+                        sent = true
+                    end
                     report("Sent: " .. actionName)
                 end)
 
