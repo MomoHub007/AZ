@@ -9054,6 +9054,8 @@ end
                     AZUserSettings.Characters
                 )
             ) .. bootstrap
+        end
+
         if type(AZUserSettings.Performance) == "table" then
             bootstrap = string.format([[
         do
