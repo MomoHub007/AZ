@@ -64,6 +64,7 @@
         Performance = {
             FPSBoost = true,
             HideSkillEffects = true,
+            FPSCap = 30,
         },
         Webhook = {
             Enabled = true,
@@ -381,6 +382,62 @@ do
     end
 end
 
+function AutoFarmSession.ApplyFPSCap()
+    if AutoFarmSession.Cancelled then
+        return false
+    end
+
+    local performance = AZUserSettings.Performance
+    local cap
+
+    if type(performance) == "table" then
+        cap = performance.FPSCap
+    end
+
+    if cap == nil then
+        cap = AZDefaults.Performance.FPSCap
+    end
+
+    if cap == false then
+        return true
+    end
+
+    local logger = getfenv().warn
+
+    if type(cap) ~= "number"
+        or cap ~= cap
+        or cap <= 0
+        or cap >= math.huge
+        or cap % 1 ~= 0
+    then
+        if type(logger) == "function" then
+            logger("[FPSCap] Use a positive integer or false")
+        end
+        return false
+    end
+
+    if typeof(setfpscap) ~= "function" then
+        if type(logger) == "function" then
+            logger("[FPSCap] setfpscap is unavailable")
+        end
+        return false
+    end
+
+    local ok, err = pcall(function()
+        setfpscap(cap)
+    end)
+
+    if type(logger) == "function" then
+        if ok then
+            logger("[FPSCap] Applied:", cap)
+        else
+            logger("[FPSCap] Failed:", err)
+        end
+    end
+
+    return ok
+end
+
     --==================================================
     -- FPS Boost / Ultra Potato Mode
     --==================================================
@@ -389,7 +446,6 @@ end
     local FPSBoostConnection = nil
     local PotatoLightingConnection = nil
 
-    local POTATO_FPS_CAP = 30
     local POTATO_COLOR = Color3.fromRGB(130, 130, 130)
 
     local function cleanupPotatoMode()
@@ -530,16 +586,6 @@ end
         FPSBoostEnabled = true
 
         print("[PotatoMode] Starting Ultra Potato Mode...")
-
-        if typeof(setfpscap) == "function" then
-            local ok, err = pcall(function()
-                setfpscap(POTATO_FPS_CAP)
-            end)
-
-            if not ok then
-                warn("[PotatoMode] FPS cap failed:", err)
-            end
-        end
 
         pcall(function()
             settings().Rendering.QualityLevel =
@@ -7947,8 +7993,7 @@ end
 
         RuntimeFix.TrialsEvolution.ActiveForEvo = nil
 
-        if not prepareTeam()
-            or AutoFarmSession.Cancelled
+        if AutoFarmSession.Cancelled
             or not queueScriptOnTeleport()
         then
             return false
@@ -9009,6 +9054,25 @@ end
                     AZUserSettings.Characters
                 )
             ) .. bootstrap
+        if type(AZUserSettings.Performance) == "table" then
+            bootstrap = string.format([[
+        do
+            local env = typeof(getgenv) == "function"
+                and getgenv() or _G
+
+            local settings = env.AnimeZeroSettings
+            if type(settings) ~= "table" then
+                settings = {}
+            end
+
+            settings.Performance =
+                game:GetService("HttpService"):JSONDecode(%q)
+
+            env.AnimeZeroSettings = settings
+        end
+    ]], game:GetService("HttpService"):JSONEncode(
+                AZUserSettings.Performance
+            )) .. bootstrap
         end
 
         local snapshotJson =
@@ -9056,6 +9120,12 @@ end
 
             if not data then
                 error(readError)
+            end
+
+            if game.PlaceId == AUTO_JOIN_PLACE_ID
+                and RuntimeFix.trialsEvolutionComplete(data)
+            then
+                return true
             end
 
             local unlocked = data.UnlockedCharacters
@@ -18516,13 +18586,7 @@ end
         startAutoLeaveAfterMatch()
         RuntimeFix.startAutoStageVote()
 
-        if AZEnabled("Performance", "FPSBoost") then
-            if typeof(setfpscap) == "function" then
-                pcall(function()
-                    setfpscap(30)
-                end)
-            end
-        end
+        AutoFarmSession.ApplyFPSCap()
 
         if not waitForInitialGameReady() then
             return
