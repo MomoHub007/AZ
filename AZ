@@ -402,7 +402,7 @@ function AutoFarmSession.ApplyFPSCap()
         return true
     end
 
-    local logger = getfenv().warn
+    local logger = warn
 
     if type(cap) ~= "number"
         or cap ~= cap
@@ -865,7 +865,7 @@ end
             if cached then
                 RuntimeFix.RuntimeConfigs[name] = cached
 
-                local logger = getfenv().warn
+                local logger = warn
 
                 if type(logger) == "function" then
                     logger(
@@ -4709,7 +4709,7 @@ end
                 return
             end
 
-            getfenv().warn(
+            warn(
                 "[AutoAimCheck] getAimPoint calls:",
                 RuntimeFix.AutoAimReadCount or 0
             )
@@ -4835,7 +4835,7 @@ end
                 if not patch.InvalidResultLogged then
                     patch.InvalidResultLogged = true
 
-                    local logger = getfenv().warn
+                    local logger = warn
 
                     if type(logger) == "function" then
                         logger(
@@ -4859,7 +4859,7 @@ end
             if not state.MouseAimLogged then
                 state.MouseAimLogged = true
 
-                local logger = getfenv().warn
+                local logger = warn
 
                 if type(logger) == "function" then
                     logger(
@@ -4877,7 +4877,7 @@ end
         end)
 
         if not assigned then
-            local logger = getfenv().warn
+            local logger = warn
 
             if type(logger) == "function" then
                 logger(
@@ -4904,7 +4904,7 @@ end
             end
         end)
 
-        local logger = getfenv().warn
+        local logger = warn
 
         if type(logger) == "function" then
             logger("[AutoAim] MouseAim.Get READY")
@@ -6875,7 +6875,7 @@ end
         end
         RuntimeFix.AccessoryCollectionMessage = message
         RuntimeFix.AccessoryCollectionLogAt = now
-        local logger = getfenv().warn
+        local logger = warn
         if type(logger) == "function" then
             logger("[AccessoryCollection] " .. message)
         end
@@ -16111,7 +16111,7 @@ end
             )
 
         -- ใช้ warn จริง เพราะไฟล์หลักปิด warn ไว้
-        local log = getfenv().warn
+        local log = warn
 
         local validUrl = type(url) == "string"
             and (
@@ -16853,7 +16853,7 @@ end
 
             characters.AutoTrait = false
 
-            local logger = getfenv().warn
+            local logger = warn
 
             if type(logger) == "function" then
                 logger(
@@ -18223,7 +18223,7 @@ end
                     lastMessage = message
                     lastMessageAt = now
 
-                    local logger = getfenv().warn
+                    local logger = warn
 
                     if type(logger) == "function" then
                         logger("[AutoEnd] " .. message)
