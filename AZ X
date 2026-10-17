@@ -22,6 +22,55 @@ if not LocalPlayer then
 end
 local Options = MacUI.Options
 
+-- Anti AFK: เปิดตลอดขณะที่ Zero X ทำงาน
+do
+    local virtualUser = game:GetService("VirtualUser")
+    local alive = true
+    local lastAttemptAt = -math.huge
+    local connection
+
+    connection = LocalPlayer.Idled:Connect(function()
+        if not alive or MacUI.Unloaded then
+            return
+        end
+
+        local now = os.clock()
+
+        if now - lastAttemptAt < 10 then
+            return
+        end
+
+        local camera = workspace.CurrentCamera
+
+        if not camera then
+            return
+        end
+
+        lastAttemptAt = now
+
+        local ok, err = pcall(function()
+            virtualUser:CaptureController()
+            virtualUser:ClickButton2(
+                Vector2.new(0, 0),
+                camera.CFrame
+            )
+        end)
+
+        if not ok then
+            warn("[Zero X / Anti AFK] Input failed:", err)
+        end
+    end)
+
+    MacUI:OnUnload(function()
+        alive = false
+
+        if connection then
+            connection:Disconnect()
+            connection = nil
+        end
+    end)
+end
+
 local ZeroXContext = {
     LobbyOwner = nil,
 }
@@ -6869,7 +6918,7 @@ do
     SkillSection:AddToggle("ZeroXAutoFarmSkills", {
         Title = "Auto Skill",
         Description = "เปิดการใช้สกิลอัตโนมัติระหว่างฟาร์ม",
-        Default = true,
+        Default = false,
     })
 
     SkillSection:AddDropdown("ZeroXSelectedSkills", {
@@ -6888,7 +6937,7 @@ do
     SkillSection:AddToggle("ZeroXUltimateOnlyBoss", {
         Title = "Ultimate Only Boss",
         Description = "ใช้ Ultimate เฉพาะเมื่อเป้าหมายปัจจุบันเป็นบอส",
-        Default = true,
+        Default = false,
     })
 
     SkillSection:AddToggle("ZeroXEnableSkillCombo", {
@@ -6920,7 +6969,7 @@ do
     HealSection:AddToggle("ZeroXRetreatHeal", {
         Title = "Retreat Heal",
         Description = "เปิดระบบถอยรอฟื้นเลือด",
-        Default = true,
+        Default = false,
     })
 
     HealSection:AddSlider("ZeroXHealStartPercent", {
