@@ -3028,7 +3028,7 @@ end
     -- Root Tween Helper
     --==================================================
 
-    RuntimeFix.TravelSpeed = 60 -- studs ต่อวินาที
+    RuntimeFix.TravelSpeed = 90 -- studs ต่อวินาที
 
     function RuntimeFix.tweenRootTo(targetCFrame, canContinue)
         local character = getCharacter()
@@ -6769,6 +6769,118 @@ end
         return true
     end
 
+    -- Cached recipes come from the same runtime configs/snapshot as existing crafting.
+    function RuntimeFix.accessoryCollectionCatalog()
+        local config = RuntimeFix.runtimeConfig("accessoryConfig")
+        local crafts = RuntimeFix.runtimeConfig("accessoryCraftConfig")
+        local cached = RuntimeFix.AccessoryCollectionCatalog
+        if cached and cached.Config == config and cached.Crafts == crafts then
+            return cached
+        end
+
+        local recipes, byId, uncraftable = {}, {}, {}
+        for craftKey, entry in pairs(crafts) do
+            assert(type(craftKey) == "string" or type(craftKey) == "number",
+                "[AccessoryCollection] Invalid craft key")
+            assert(type(entry) == "table" and entry.CarftID ~= nil,
+                "[AccessoryCollection] Invalid craft entry")
+            local id = tostring(entry.CarftID)
+            local accessory = config[id] or config[tonumber(id)]
+            assert(type(accessory) == "table" and type(accessory.Name) == "string",
+                "[AccessoryCollection] Missing accessory config: " .. id)
+            assert(not byId[id], "[AccessoryCollection] Duplicate recipe: " .. id)
+            local requirements = RuntimeFix.parseRuntimeMaterials(entry.Misc)
+            local materials = {}
+            for materialId, amount in pairs(requirements) do
+                table.insert(materials, {materialId, amount})
+            end
+            table.sort(materials, function(a, b) return a[1] < b[1] end)
+            local recipe = {Id = id, Index = tostring(craftKey),
+                Name = accessory.Name, Materials = materials}
+            byId[id] = recipe
+            table.insert(recipes, recipe)
+        end
+        assert(#recipes > 0, "[AccessoryCollection] Empty craft catalog")
+        table.sort(recipes, function(a, b) return a.Id < b.Id end)
+
+        for id, entry in pairs(config) do
+            if type(entry) == "table" and type(entry.Name) == "string"
+                and not byId[tostring(id)]
+            then
+                table.insert(uncraftable, {Id = tostring(id), Name = entry.Name})
+            end
+        end
+        table.sort(uncraftable, function(a, b) return a.Id < b.Id end)
+        cached = {Config = config, Crafts = crafts,
+            Recipes = recipes, Uncraftable = uncraftable}
+        RuntimeFix.AccessoryCollectionCatalog = cached
+        return cached
+    end
+
+    -- Read only: the Lobby router and end-of-round router use this same plan.
+    function RuntimeFix.getAccessoryCollectionPlan(data)
+        assert(type(data) == "table" and type(data.accessory) == "table"
+            and type(data.material) == "table",
+            "[AccessoryCollection] Account inventory/materials unavailable")
+        local catalog = RuntimeFix.accessoryCollectionCatalog()
+        local plan = {Owned = 0, Total = #catalog.Recipes, UncraftableMissing = {}}
+        for _, recipe in ipairs(catalog.Recipes) do
+            if isAccessoryOwned(data, recipe.Id) then
+                plan.Owned = plan.Owned + 1
+            else
+                plan.Recipe = plan.Recipe or recipe
+                if not plan.Ready and hasCraftMaterials(data, recipe.Materials) then
+                    plan.Ready = recipe
+                end
+            end
+        end
+        for _, accessory in ipairs(catalog.Uncraftable) do
+            if not isAccessoryOwned(data, accessory.Id) then
+                table.insert(plan.UncraftableMissing, accessory.Name)
+            end
+        end
+
+        local progress = string.format("Accessory craft collection %d/%d",
+            plan.Owned, plan.Total)
+        if not plan.Recipe then
+            plan.Reason = "Endless Shadow Gate"
+            return plan
+        end
+        if plan.Ready then
+            plan.Reason = progress .. " | " .. plan.Ready.Name
+                .. " ready -> Lobby to craft"
+            return plan
+        end
+
+        local missing = {}
+        for _, requirement in ipairs(plan.Recipe.Materials) do
+            if getMaterialAmount(data, requirement[1]) < requirement[2] then
+                missing[tostring(requirement[1])] = true
+            end
+        end
+        assert(next(missing), "[AccessoryCollection] Missing material plan is empty")
+        plan.Target = RuntimeFix.runtimeMaterialTarget(missing, 4, {hxh = true})
+        assert(plan.Target and plan.Target.Map == "hxh",
+            "[AccessoryCollection] No supported Story material source")
+        plan.Reason = progress .. " | Craft " .. plan.Recipe.Name .. " materials"
+        return plan
+    end
+
+    function RuntimeFix.reportAccessoryCollection(message)
+        local now = os.clock()
+        if message == RuntimeFix.AccessoryCollectionMessage
+            and now - (RuntimeFix.AccessoryCollectionLogAt or 0) < 10
+        then
+            return
+        end
+        RuntimeFix.AccessoryCollectionMessage = message
+        RuntimeFix.AccessoryCollectionLogAt = now
+        local logger = getfenv().warn
+        if type(logger) == "function" then
+            logger("[AccessoryCollection] " .. message)
+        end
+    end
+
     -- อ่านอย่างเดียว: เลือกชิ้นที่ยังไม่มีและวัตถุดิบครบ
     function RuntimeFix.getReadyAccessoryCraft(data)
         if type(data) ~= "table"
@@ -6776,6 +6888,10 @@ end
             or type(data.material) ~= "table"
         then
             error("Accessory/material data unavailable")
+        end
+
+        if RuntimeFix.trialsEvolutionComplete(data) then
+            return RuntimeFix.getAccessoryCollectionPlan(data).Ready
         end
 
         local recipes = {}
@@ -6816,7 +6932,6 @@ end
         return nil
     end
 
-    -- คราฟต์เฉพาะชิ้นที่พร้อม ไม่ออกไปฟาร์มจากฟังก์ชันนี้
     function RuntimeFix.craftReadyAccessories()
         if AutoFarmSession.Cancelled
             or game.PlaceId ~= AUTO_JOIN_PLACE_ID
@@ -6834,8 +6949,14 @@ end
         RuntimeFix.Crafting = true
 
         local ok, result = pcall(function()
-            -- มีทั้งหมดสี่ชิ้น อ่านยอดใหม่หลังคราฟต์ทุกครั้ง
-            for _ = 1, 4 do
+            local initial, readError = RuntimeFix.readAccount()
+            if not initial then
+                error("Craft account unavailable: " .. tostring(readError))
+            end
+            local limit = RuntimeFix.trialsEvolutionComplete(initial)
+                and #RuntimeFix.accessoryCollectionCatalog().Recipes or 4
+            -- Read fresh inventory after every confirmed craft.
+            for _ = 1, limit do
                 if AutoFarmSession.Cancelled then
                     return false
                 end
@@ -6852,7 +6973,7 @@ end
                     return true
                 end
 
-                print("[AutoCraft] Ready first ->", recipe.Name)
+                RuntimeFix.reportAccessoryCollection("Crafting -> " .. recipe.Name)
 
                 local crafted = craftAccessoryByIndex(
                     recipe.Index,
@@ -6863,7 +6984,8 @@ end
 
                 if not crafted then
                     RuntimeFix.ReadyCraftRetryAt = os.clock() + 5
-                    warn("[AutoCraft] Waiting for confirmation:", recipe.Name)
+                    RuntimeFix.reportAccessoryCollection(
+                        "Craft not confirmed: " .. recipe.Name .. " | Retry in 5s")
                     return false
                 end
             end
@@ -6875,7 +6997,7 @@ end
 
         if not ok then
             RuntimeFix.ReadyCraftRetryAt = os.clock() + 5
-            warn("[AutoCraft] Ready craft failed:", result)
+            RuntimeFix.reportAccessoryCollection("Craft failed: " .. tostring(result))
             return false
         end
 
@@ -7966,56 +8088,82 @@ end
         end
 
         local data = RuntimeFix.readAccount()
-
         if not RuntimeFix.trialsEvolutionComplete(data) then
             return false
         end
 
-        local queueKey = "Completed_ShadowGate"
+        local plan = RuntimeFix.getAccessoryCollectionPlan(data)
+        local message = plan.Reason
+        if not plan.Recipe then
+            message = message .. string.format(" | Craftable complete %d/%d",
+                plan.Owned, plan.Total)
+            if #plan.UncraftableMissing > 0 then
+                message = message .. " | No craft recipe, still missing: "
+                    .. table.concat(plan.UncraftableMissing, ", ")
+            end
+        end
+        RuntimeFix.reportAccessoryCollection(message)
+        if plan.Ready then
+            if not RuntimeFix.monarchClearQueue() then
+                return false
+            end
+            RuntimeFix.craftReadyAccessories()
+            return false -- Next watcher pass re-reads ownership and selects a stage.
+        end
+
+        local target = plan.Target or {
+            Map = "sololevelingraid", Chapter = 1, Difficulty = 4,
+        }
+        local queueKey = plan.Target
+            and ("AccessoryCollection_" .. target.Map .. "_" .. target.Chapter)
+            or "Completed_ShadowGate"
 
         if ActiveLobbyQueue == queueKey
             and LastLobbyJoinAttemptClock > 0
-            and os.clock() - LastLobbyJoinAttemptClock
-                < LOBBY_JOIN_TIMEOUT_SECONDS
+            and os.clock() - LastLobbyJoinAttemptClock < LOBBY_JOIN_TIMEOUT_SECONDS
         then
             return true
         end
 
         local retrying = ActiveLobbyQueue == queueKey
-
         if not RuntimeFix.monarchClearQueue() then
             return false
         end
-
         if retrying then
             cycleNextRoomNumber()
         end
-
         RuntimeFix.TrialsEvolution.ActiveForEvo = nil
 
-        if AutoFarmSession.Cancelled
-            or not queueScriptOnTeleport()
-        then
+        if AutoFarmSession.Cancelled or not queueScriptOnTeleport() then
             return false
         end
 
-        -- การจัดทีมมี yield จึงตรวจ Evo ใหม่ก่อนสร้างคิว
-        if not RuntimeFix.trialsEvolutionComplete(
-            RuntimeFix.readAccount()
-        ) then
+        -- Teleport preparation can yield. Recheck both progression and materials.
+        local fresh = RuntimeFix.readAccount()
+        if AutoFarmSession.Cancelled or not RuntimeFix.trialsEvolutionComplete(fresh) then
+            return false
+        end
+        local updated = RuntimeFix.getAccessoryCollectionPlan(fresh)
+        local freshTarget = updated.Target or {
+            Map = "sololevelingraid", Chapter = 1, Difficulty = 4,
+        }
+        if updated.Ready or freshTarget.Map ~= target.Map
+            or freshTarget.Chapter ~= target.Chapter
+            or freshTarget.Difficulty ~= target.Difficulty
+        then
             return false
         end
 
         ActiveLobbyQueue = queueKey
         LastLobbyJoinAttemptClock = os.clock()
         LastLobbyJoinAction = RuntimeFix.runMonarch
-
+        local isStory = target.Map == "hxh"
         return RuntimeFix.createQueue({
-            gamemode = "Raid",
-            map = "ShadowGate",
-            chapter = 0,
+            gamemode = isStory and "Story" or "Raid",
+            map = isStory and "Hxh" or "ShadowGate",
+            chapter = isStory and target.Chapter or 0,
             floor = 0,
-            difficulty = 4,
+            difficulty = target.Difficulty,
             maxPlayers = 1,
             friendsOnly = false,
             roomNumber = CurrentLobbyRoomNumber,
@@ -13763,6 +13911,7 @@ end
         local yeStatusLabel
         local igrisSummaryLabel
         local igrisNodeLabels = {}
+        local accessoryView = {Rows = {}}
 
         local crownStatusLabel
         local wingsStatusLabel
@@ -14371,6 +14520,78 @@ end
                 igrisNodeLabels[node] = label
             end
 
+            -- Accessory view shares the existing status card; no extra ScreenGui.
+            accessoryView.Content = content
+            accessoryView.Heading = statusHeading
+            accessoryView.HeadingText = statusHeading.Text
+            statusHeading.Position = UDim2.fromScale(0.34, 0.045)
+            statusHeading.Size = UDim2.fromScale(0.60, 0.045)
+
+            local accessoryButton = Instance.new("TextButton")
+            accessoryButton.Name = "AccessoryTab"
+            accessoryButton.AnchorPoint = Vector2.new(1, 0)
+            accessoryButton.Position = UDim2.fromScale(0.975, 0.01)
+            accessoryButton.Size = UDim2.fromScale(0.31, 0.07)
+            accessoryButton.BackgroundColor3 = Color3.fromRGB(49, 40, 73)
+            accessoryButton.BorderSizePixel = 0
+            accessoryButton.Font = Enum.Font.GothamBold
+            accessoryButton.Text = "Accessory"
+            accessoryButton.TextColor3 = Color3.fromRGB(229, 220, 255)
+            accessoryButton.TextScaled = true
+            accessoryButton.ZIndex = 6
+            accessoryButton.Parent = statusCard
+            round(accessoryButton, 8)
+            local buttonLimit = Instance.new("UITextSizeConstraint")
+            buttonLimit.MaxTextSize = 14
+            buttonLimit.Parent = accessoryButton
+            accessoryView.Button = accessoryButton
+
+            local accessoryFrame = Instance.new("Frame")
+            accessoryFrame.Name = "AccessoryCollectionView"
+            accessoryFrame.AnchorPoint = content.AnchorPoint
+            accessoryFrame.Position = content.Position
+            accessoryFrame.Size = content.Size
+            accessoryFrame.BackgroundTransparency = 1
+            accessoryFrame.Visible = false
+            accessoryFrame.ZIndex = 4
+            accessoryFrame.Parent = statusCard
+            accessoryView.Frame = accessoryFrame
+
+            local summary = Instance.new("TextLabel")
+            summary.Name = "CollectionSummary"
+            summary.BackgroundTransparency = 1
+            summary.Size = UDim2.new(1, 0, 0, 50)
+            summary.Font = Enum.Font.GothamBold
+            summary.Text = "Accessory | กำลังรอข้อมูล"
+            summary.TextColor3 = Color3.fromRGB(115, 225, 255)
+            summary.TextSize = 14
+            summary.TextWrapped = true
+            summary.TextXAlignment = Enum.TextXAlignment.Left
+            summary.ZIndex = 5
+            summary.Parent = accessoryFrame
+            accessoryView.Summary = summary
+
+            local list = Instance.new("ScrollingFrame")
+            list.Name = "AccessoryList"
+            list.BackgroundTransparency = 1
+            list.BorderSizePixel = 0
+            list.Position = UDim2.fromOffset(0, 54)
+            list.Size = UDim2.new(1, 0, 1, -54)
+            list.CanvasSize = UDim2.fromOffset(0, 0)
+            list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+            list.ScrollingDirection = Enum.ScrollingDirection.Y
+            list.ScrollBarThickness = 5
+            list.ScrollBarImageColor3 = Color3.fromRGB(166, 126, 255)
+            list.Active = true
+            list.ZIndex = 4
+            list.Parent = accessoryFrame
+            accessoryView.List = list
+
+            local layout = Instance.new("UIListLayout")
+            layout.SortOrder = Enum.SortOrder.LayoutOrder
+            layout.Padding = UDim.new(0, 5)
+            layout.Parent = list
+
             toggle.BackgroundColor3 = Color3.fromRGB(26, 24, 43)
             toggle.BackgroundTransparency = 0.08
             toggle.TextColor3 = Color3.fromRGB(229, 220, 255)
@@ -14951,6 +15172,163 @@ end
                 .. "\nEvo | " .. evoText
         end
 
+        local function refreshAccessoryView(data)
+            if not accessoryView.Frame or not accessoryView.Frame.Visible then
+                return
+            end
+
+            local ok, catalog = pcall(RuntimeFix.accessoryCollectionCatalog)
+            if not ok then
+                accessoryView.Summary.Text = "Accessory | รอข้อมูล Config"
+                accessoryView.List.Visible = false
+                RuntimeFix.reportAccessoryCollection("UI config unavailable: " .. tostring(catalog))
+                return
+            end
+            accessoryView.List.Visible = true
+
+            if accessoryView.Catalog ~= catalog then
+                for _, row in ipairs(accessoryView.Rows) do
+                    row.Frame:Destroy()
+                end
+                table.clear(accessoryView.Rows)
+                local entries = {}
+                for _, recipe in ipairs(catalog.Recipes) do
+                    table.insert(entries, {Id = recipe.Id, Name = recipe.Name, Recipe = recipe})
+                end
+                for _, accessory in ipairs(catalog.Uncraftable) do
+                    table.insert(entries, {Id = accessory.Id, Name = accessory.Name})
+                end
+                table.sort(entries, function(a, b) return a.Id < b.Id end)
+
+                for index, entry in ipairs(entries) do
+                    local row = Instance.new("Frame")
+                    row.Name = "Accessory_" .. entry.Id
+                    row.LayoutOrder = index
+                    row.Size = UDim2.new(1, -10, 0, 60)
+                    row.BackgroundColor3 = Color3.fromRGB(36, 34, 53)
+                    row.BackgroundTransparency = 0.15
+                    row.BorderSizePixel = 0
+                    row.ZIndex = 4
+                    row.Parent = accessoryView.List
+                    local corner = Instance.new("UICorner")
+                    corner.CornerRadius = UDim.new(0, 7)
+                    corner.Parent = row
+
+                    local configEntry = catalog.Config[entry.Id]
+                        or catalog.Config[tonumber(entry.Id)]
+                    local rawIcon = type(configEntry) == "table" and configEntry.Icon
+                    local image = nil
+                    if type(rawIcon) == "string" then
+                        if rawIcon:match("^%d+$") and (tonumber(rawIcon) or 0) > 0 then
+                            image = "rbxassetid://" .. rawIcon
+                        elseif rawIcon:match("^rbxassetid://%d+$")
+                            and (tonumber(rawIcon:match("(%d+)$")) or 0) > 0
+                        then
+                            image = rawIcon
+                        end
+                    end
+
+                    local icon = Instance.new("ImageLabel")
+                    icon.Name = "AccessoryIcon"
+                    icon.BackgroundTransparency = 1
+                    icon.Position = UDim2.fromOffset(8, 8)
+                    icon.Size = UDim2.fromOffset(44, 44)
+                    icon.ScaleType = Enum.ScaleType.Fit
+                    icon.Image = image or ""
+                    icon.ZIndex = 5
+                    icon.Parent = row
+
+                    if not image then
+                        local fallback = Instance.new("TextLabel")
+                        fallback.Name = "NoIcon"
+                        fallback.BackgroundTransparency = 1
+                        fallback.Size = UDim2.fromScale(1, 1)
+                        fallback.Font = Enum.Font.Gotham
+                        fallback.Text = "ไม่มีรูป"
+                        fallback.TextSize = 10
+                        fallback.TextColor3 = Color3.fromRGB(176, 182, 200)
+                        fallback.ZIndex = 6
+                        fallback.Parent = icon
+                    end
+
+                    local name = Instance.new("TextLabel")
+                    name.BackgroundTransparency = 1
+                    name.Position = UDim2.fromOffset(60, 3)
+                    name.Size = UDim2.new(0.57, -62, 1, -6)
+                    name.Font = Enum.Font.GothamMedium
+                    name.Text = entry.Name
+                    name.TextColor3 = Color3.fromRGB(240, 240, 245)
+                    name.TextScaled = true
+                    name.TextWrapped = true
+                    name.TextXAlignment = Enum.TextXAlignment.Left
+                    name.ZIndex = 5
+                    name.Parent = row
+                    local nameLimit = Instance.new("UITextSizeConstraint")
+                    nameLimit.MaxTextSize = 14
+                    nameLimit.Parent = name
+
+                    local value = Instance.new("TextLabel")
+                    value.BackgroundTransparency = 1
+                    value.Position = UDim2.new(0.59, 0, 0, 3)
+                    value.Size = UDim2.new(0.41, -8, 1, -6)
+                    value.Font = Enum.Font.GothamMedium
+                    value.Text = "รอข้อมูล"
+                    value.TextScaled = true
+                    value.TextWrapped = true
+                    value.TextXAlignment = Enum.TextXAlignment.Right
+                    value.ZIndex = 5
+                    value.Parent = row
+                    local valueLimit = Instance.new("UITextSizeConstraint")
+                    valueLimit.MaxTextSize = 12
+                    valueLimit.Parent = value
+                    table.insert(accessoryView.Rows, {
+                        Frame = row, Value = value, Entry = entry,
+                    })
+                end
+                accessoryView.Catalog = catalog
+            end
+
+            local inventoryKnown = type(data) == "table" and type(data.accessory) == "table"
+            local historyKnown = type(data) == "table" and type(data.craftedAccessories) == "table"
+            local materialsKnown = type(data) == "table" and type(data.material) == "table"
+            local craftedCount, ownedCount = 0, 0
+            for _, row in ipairs(accessoryView.Rows) do
+                local entry = row.Entry
+                local crafted = historyKnown and data.craftedAccessories[entry.Id] == true
+                local owned = inventoryKnown and isAccessoryOwned(data, entry.Id)
+                if owned then ownedCount += 1 end
+                if crafted and entry.Recipe then craftedCount += 1 end
+
+                local text, color
+                if not inventoryKnown then
+                    text, color = "รอข้อมูล Inventory", Color3.fromRGB(176, 182, 200)
+                elseif not entry.Recipe then
+                    text = owned and "มีแล้ว • คราฟต์ไม่ได้" or "ยังไม่มี • คราฟต์ไม่ได้"
+                    color = owned and Color3.fromRGB(0, 233, 139) or Color3.fromRGB(176, 182, 200)
+                elseif crafted then
+                    text = owned and "คราฟต์แล้ว • มีอยู่" or "คราฟต์แล้ว • ไม่มีในคลัง"
+                    color = Color3.fromRGB(0, 233, 139)
+                elseif owned then
+                    text = historyKnown and "มีแล้ว • ไม่พบประวัติคราฟต์" or "มีแล้ว • รอประวัติคราฟต์"
+                    color = Color3.fromRGB(115, 225, 255)
+                elseif not historyKnown then
+                    text, color = "ยังไม่มี • รอประวัติคราฟต์", Color3.fromRGB(176, 182, 200)
+                elseif materialsKnown and hasCraftMaterials(data, entry.Recipe.Materials) then
+                    text, color = "ยังไม่คราฟต์ • ของครบ", Color3.fromRGB(255, 209, 102)
+                else
+                    text, color = "ยังไม่คราฟต์", Color3.fromRGB(255, 94, 106)
+                end
+                if row.Value.Text ~= text then row.Value.Text = text end
+                row.Value.TextColor3 = color
+            end
+
+            accessoryView.Summary.Text = string.format(
+                "คราฟต์แล้ว %s/%d สูตร | มีอยู่ %s/%d ชิ้น\nเลื่อนดูรายการทั้งหมดได้",
+                historyKnown and tostring(craftedCount) or "?", #catalog.Recipes,
+                inventoryKnown and tostring(ownedCount) or "?", #accessoryView.Rows
+            )
+        end
+
         local function refreshStatus()
             local activityOk, activityText = pcall(
                 getCurrentActivityText
@@ -14980,6 +15358,7 @@ end
             end
 
             local data = RuntimeFix.readAccount()
+            refreshAccessoryView(data)
 
             if rinStatusLabel then
                 rinStatusLabel.Text = getTrialsUnitStatusText(
@@ -15195,6 +15574,16 @@ end
                 )
         end
 
+        local accessoryTabConnection = accessoryView.Button.Activated:Connect(function()
+            if AutoFarmSession.Cancelled then return end
+            local opened = not accessoryView.Frame.Visible
+            accessoryView.Frame.Visible = opened
+            accessoryView.Content.Visible = not opened
+            accessoryView.Button.Text = opened and "กลับสถานะ" or "Accessory"
+            accessoryView.Heading.Text = opened and "ACCESSORY" or accessoryView.HeadingText
+            if opened then refreshStatus() end
+        end)
+
         local toggleConnection = toggle.Activated:Connect(function()
             if AutoFarmSession.Cancelled then
                 return
@@ -15228,6 +15617,7 @@ end
         table.insert(AutoFarmSession.Cleanups, function()
             updateConnection:Disconnect()
             toggleConnection:Disconnect()
+            accessoryTabConnection:Disconnect()
             blur:Destroy()
             gui:Destroy()
 
@@ -17443,6 +17833,10 @@ end
         end
 
         if RuntimeFix.trialsEvolutionComplete(data) then
+            local plan = RuntimeFix.getAccessoryCollectionPlan(data)
+            if plan.Recipe then
+                return plan.Target, plan.Reason
+            end
             return {
                 Map = "sololevelingraid",
                 Chapter = 1,
