@@ -5114,7 +5114,11 @@ end
             if AutoFarmSession.Cancelled
                 or not AutoFarmEnabled
                 or not state
-                or state.skillKey ~= "2"
+                or (
+                    state.skillKey ~= "2"
+                    and game:GetService("UserInputService").PreferredInput
+                        ~= Enum.PreferredInput.Touch
+                )
                 or root ~= getCharacterRoot()
             then
                 return original(...)
@@ -5140,6 +5144,13 @@ end
             -- รักษาโครงสร้างผลลัพธ์จริงและค่าที่ส่งคืนเพิ่มเติม
             local results = table.pack(original(...))
             local result = results[1]
+
+            if typeof(result) == "Vector3" then
+                results[1] = position
+                state.lastValidAim = position
+
+                return table.unpack(results, 1, results.n)
+            end
 
             if type(result) ~= "table" then
                 if not patch.InvalidResultLogged then
@@ -5435,9 +5446,210 @@ end
         return ready == true
     end
 
+    function RuntimeFix.skillReady(slot)
+        if AutoFarmSession.Cancelled or not AutoFarmEnabled then
+            return false
+        end
+
+        local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+
+        if not playerGui
+            or playerGui:GetAttribute("MobileLayoutEditing") == true then
+            return false
+        end
+
+        local humanoid = getHumanoid()
+
+        if not humanoid or humanoid.Health <= 0 or isGameSkillBusy() then
+            return false
+        end
+
+        local ok, ready = pcall(function()
+            if not ultimateNamespace then
+                ultimateNamespace = RuntimeFix.requireModule(
+                    ReplicatedStorage,
+                    { "game", "stores", "playerNamespace" }
+                )
+            end
+
+            assert(
+                ultimateNamespace
+                    and type(ultimateNamespace.getLocalPlayerStore) == "function"
+                    and type(ultimateNamespace.skillCooldownKey) == "function",
+                "Skill playerNamespace API unavailable"
+            )
+
+            local store = ultimateNamespace.getLocalPlayerStore()
+            local state = store and store.state
+
+            if not state or not state.character or not state.cooldowns then
+                return false
+            end
+
+            local characterName = state.character:get()
+
+            if type(characterName) ~= "string" or characterName == "" then
+                return false
+            end
+
+            local key = ultimateNamespace.skillCooldownKey(
+                characterName,
+                slot
+            )
+
+            local entry = state.cooldowns:get(key)
+            local cooldownTill = entry and entry:get() or 0
+
+            if type(cooldownTill) ~= "number"
+                or cooldownTill ~= cooldownTill then
+                error("Invalid cooldown value: " .. tostring(key))
+            end
+
+            return workspace:GetServerTimeNow() >= cooldownTill
+        end)
+
+        if not ok then
+            RuntimeFix.skillIssue("Skill readiness read failed", ready)
+            return false
+        end
+
+        return ready == true
+    end
+
+    function RuntimeFix.invokeAutoSkill(controller, slot, touchInput)
+        if not touchInput then
+            return controller.performSkill(slot)
+        end
+
+        local patch = RuntimeFix.MouseAimPatch
+        local aim = patch and patch.Module
+
+        assert(
+            type(aim) == "table"
+                and type(aim.IsAiming) == "function"
+                and type(aim.AimingSlot) == "function",
+            "Touch MouseAim state API unavailable"
+        )
+
+        assert(
+            type(controller.touchSkillUp) == "function",
+            "characterController.touchSkillUp unavailable"
+        )
+
+        local character = getCharacter()
+
+        local function cooldown()
+            if not ultimateNamespace then
+                ultimateNamespace = RuntimeFix.requireModule(
+                    ReplicatedStorage,
+                    { "game", "stores", "playerNamespace" }
+                )
+            end
+
+            assert(
+                type(ultimateNamespace.getLocalPlayerStore) == "function"
+                    and type(ultimateNamespace.skillCooldownKey) == "function",
+                "Touch cooldown API unavailable"
+            )
+
+            local store = ultimateNamespace.getLocalPlayerStore()
+            local state = store and store.state
+
+            assert(
+                state and state.character and state.cooldowns,
+                "Touch cooldown state unavailable"
+            )
+
+            local name = state.character:get()
+
+            assert(
+                type(name) == "string" and name ~= "",
+                "Touch character state unavailable"
+            )
+
+            local key = ultimateNamespace.skillCooldownKey(name, slot)
+            local entry = state.cooldowns:get(key)
+            local till = entry and entry:get() or 0
+
+            assert(
+                type(till) == "number" and till == till,
+                "Invalid Touch skill cooldown"
+            )
+
+            return till
+        end
+
+        local before = cooldown()
+
+        if aim.IsAiming() then
+            -- ไม่ปล่อยหรือยกเลิกการเล็งของสกิลช่องอื่น
+            if aim.AimingSlot() ~= slot then
+                RuntimeFix.skillIssue(
+                    "Touch aim belongs to another slot",
+                    "Requested=" .. slot
+                )
+                return false
+            end
+        else
+            local accepted = controller.performSkill(slot)
+
+            if not aim.IsAiming() then
+                return accepted == true
+            end
+
+            if aim.AimingSlot() ~= slot then
+                RuntimeFix.skillIssue(
+                    "Touch aim changed slot",
+                    "Requested=" .. slot
+                )
+                return false
+            end
+        end
+
+        if AutoFarmSession.Cancelled
+            or not AutoFarmEnabled
+            or getCharacter() ~= character
+        then
+            return false
+        end
+
+        -- ใช้เส้นทางปล่อยปุ่มเดียวกับระบบมือถือของเกม
+        controller.touchSkillUp(slot)
+
+        -- ไม่ถือว่า Begin/Release สำเร็จเท่ากับเริ่มร่ายสำเร็จ
+        local deadline = os.clock() + 0.6
+
+        repeat
+            if AutoFarmSession.Cancelled
+                or not AutoFarmEnabled
+                or getCharacter() ~= character
+            then
+                return false
+            end
+
+            if isGameSkillBusy() or cooldown() > before then
+                return true
+            end
+
+            if not aim.IsAiming() then
+                task.wait(0.05)
+            else
+                task.wait(0.1)
+            end
+        until os.clock() >= deadline
+
+        RuntimeFix.skillIssue(
+            "Touch release not confirmed",
+            "Slot=" .. slot
+        )
+
+        return false
+    end
+
     local function pressSkillKey(keyCode, worldPosition)
         if AutoFarmSession.Cancelled
             or not AutoFarmEnabled
+            or RuntimeFix.SkillInvokeBusy
             or isGameSkillBusy()
         then
             return false
@@ -5453,13 +5665,24 @@ end
             return false
         end
 
+        if not RuntimeFix.skillReady(slot) then
+            return false
+        end
+
         if slot == 4 and not canUseUltimate() then
             return false
         end
 
-        if slot == 2 and not RuntimeFix.ensureMouseAimAPI() then
+        local touchInput =
+            game:GetService("UserInputService").PreferredInput
+                == Enum.PreferredInput.Touch
+
+        if (slot == 2 or touchInput)
+            and not RuntimeFix.ensureMouseAimAPI()
+        then
             RuntimeFix.skillIssue(
-                "Skill 2 MouseAim API unavailable"
+                "MouseAim API unavailable",
+                "Slot=" .. slot
             )
             return false
         end
@@ -5575,11 +5798,16 @@ end
             return false
         end
 
+        RuntimeFix.SkillInvokeBusy = true
+
         local success, result = xpcall(function()
-            -- ใช้บริบทสคริปต์เกมเฉพาะช่วงเรียกสกิล
             changeIdentity(2)
 
-            return controller.performSkill(slot)
+            return RuntimeFix.invokeAutoSkill(
+                controller,
+                slot,
+                touchInput
+            )
         end, function(err)
             return debug.traceback(tostring(err), 2)
         end)
@@ -5589,6 +5817,8 @@ end
             changeIdentity,
             previousIdentity
         )
+
+        RuntimeFix.SkillInvokeBusy = nil
 
         if not restored then
             SkillAimState = nil
@@ -5723,7 +5953,8 @@ end
                 local skillKey = tostring(slot)
                 local lastAttempt = LastSkillActivation[skillKey] or 0
 
-                if now - lastAttempt >= retryDelay then
+                if now - lastAttempt >= retryDelay
+                    and RuntimeFix.skillReady(slot) then
                     LastSkillActivation[skillKey] = now
 
                     if pressSkillKey(keyCodes[slot], worldPosition) then
@@ -9935,7 +10166,16 @@ end
                     end
                 end
 
-                local target = RuntimeFix.runtimeMaterialTarget(missing, 4)
+                local target = RuntimeFix.runtimeMaterialTarget(
+                    missing,
+                    4,
+                    recipe.Character == "cha_hae_in"
+                        and {
+                            hxh = true,
+                            fateraid = true,
+                        }
+                        or nil
+                )
 
                 if not target
                     and (money < recipe.Money or gems < recipe.Gems)
@@ -12916,10 +13156,7 @@ end)
         RuntimeFix.StoredRequestId =
             RuntimeFix.StoredRequestId % 65535 + 1
 
-        local packetSlot =
-            isSolarCharacter
-            and ("Slot" .. tostring(targetSlot))
-            or targetSlot
+        local packetSlot = targetSlot
 
         RuntimeFix.StoredPending = {
             character = character,
@@ -12937,11 +13174,21 @@ end)
             warned = false,
         }
 
-        packets.placeStoredUnit:fire({
-            character = character,
-            slot = packetSlot,
-            requestId = RuntimeFix.StoredRequestId,
-        })
+        local request = RuntimeFix.StoredPending
+
+        local sent, sendError = pcall(function()
+            packets.placeStoredUnit:fire({
+                character = character,
+                slot = packetSlot,
+                requestId = request.requestId,
+            })
+        end)
+
+        if not sent then
+            -- เก็บคำขอไว้ เพราะยังไม่ยืนยันว่า Server ได้รับหรือไม่
+            request.SendError = tostring(sendError)
+            return false
+        end
 
         print(
             "[UnitStorage] Request sent:",
@@ -17015,7 +17262,30 @@ end)
                 end
 
                 if RuntimeFix.StoredPending then
-                    return "กำลังนำตัวละครออกจาก Storage"
+                    local pending = RuntimeFix.StoredPending
+
+                    if pending.SendError then
+                        return "Storage ส่งไม่สำเร็จ | " .. pending.SendError
+                    end
+
+                    if pending.response then
+                        return string.format(
+                            "Storage ผลตอบกลับ | success=%s | reason=%s",
+                            tostring(pending.response.success),
+                            tostring(pending.response.reason)
+                        )
+                    end
+
+                    return string.format(
+                        "Storage %s | ตัว=%s | slot=%s (%s) | requestId=%s",
+                        os.clock() >= pending.deadline
+                            and "หมดเวลารอผล"
+                            or "รอผล",
+                        tostring(pending.character),
+                        tostring(pending.packetSlot),
+                        typeof(pending.packetSlot),
+                        tostring(pending.requestId)
+                    )
                 end
 
                 if CustomAutoRollEnabled then
@@ -17109,8 +17379,17 @@ end)
             )
 
             if not ok then
-                return "กำลังรอข้อมูลเป้าหมายฟาร์ม"
+                local failure = tostring(target)
+
+                if RuntimeFix.LastFarmPlanError ~= failure then
+                    RuntimeFix.LastFarmPlanError = failure
+                    warn("[FarmPlan] " .. failure)
+                end
+
+                return "Farm Error | " .. failure
             end
+
+            RuntimeFix.LastFarmPlanError = nil
 
             reason = tostring(reason or "")
             local lower = string.lower(reason)
