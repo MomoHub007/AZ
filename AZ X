@@ -1,5 +1,11 @@
+local AutoSkillWarn = warn
+local AUTO_SKILL_DEBUG = true -- หลังตรวจเสร็จเปลี่ยนเป็น false
+
+
+
 local print = function() end
 local warn = function() end
+
 
 if not game:IsLoaded() then
     repeat
@@ -21,6 +27,190 @@ if not LocalPlayer then
     return
 end
 local Options = MacUI.Options
+
+-- Local overhead name
+do
+    local DISPLAY_TEXT = "ZeroX Script Hub"
+
+    local alive = true
+    local currentCharacter
+    local characterConnections = {}
+    local records = {}
+
+    local function clearLabels()
+        for label, record in pairs(records) do
+            record.connection:Disconnect()
+
+            if label.Parent and label.Text == DISPLAY_TEXT then
+                label.Text = record.original
+            end
+        end
+
+        table.clear(records)
+    end
+
+    local function clearCharacter()
+        for _, connection in ipairs(characterConnections) do
+            connection:Disconnect()
+        end
+
+        table.clear(characterConnections)
+        clearLabels()
+        currentCharacter = nil
+    end
+
+    local function bindCharacter(character)
+        clearCharacter()
+
+        if not alive then
+            return
+        end
+
+        currentCharacter = character
+        local queued = false
+
+        local function sync()
+            if not alive
+                or currentCharacter ~= character
+                or LocalPlayer.Character ~= character then
+
+                return
+            end
+
+            local overhead = character:FindFirstChild("OverHead")
+
+            local main = overhead
+                and overhead:IsA("BillboardGui")
+                and overhead:FindFirstChild("Main")
+
+            local holder = main
+                and main:FindFirstChild("DisplayName")
+
+            local shadow = holder
+                and holder:FindFirstChild("TxtShadow")
+
+            local foreground = shadow
+                and shadow:FindFirstChild("Txt")
+
+            local targets = {}
+
+            if shadow and shadow:IsA("TextLabel") then
+                targets[shadow] = true
+            end
+
+            if foreground and foreground:IsA("TextLabel") then
+                targets[foreground] = true
+            end
+
+            -- ตัด Connection ของป้ายเก่าที่ถูกเปลี่ยน
+            for label, record in pairs(records) do
+                if not targets[label] then
+                    record.connection:Disconnect()
+
+                    if label.Parent
+                        and label.Text == DISPLAY_TEXT then
+
+                        label.Text = record.original
+                    end
+
+                    records[label] = nil
+                end
+            end
+
+            for label in pairs(targets) do
+                if not records[label] then
+                    local record = {
+                        original = label.Text,
+                    }
+
+                    records[label] = record
+
+                    record.connection =
+                        label:GetPropertyChangedSignal("Text"):Connect(function()
+                            if not alive
+                                or currentCharacter ~= character
+                                or LocalPlayer.Character ~= character then
+
+                                return
+                            end
+
+                            if label.Text ~= DISPLAY_TEXT then
+                                -- เก็บข้อความล่าสุดของเกมไว้คืนตอน Unload
+                                record.original = label.Text
+                                label.Text = DISPLAY_TEXT
+                            end
+                        end)
+
+                    if label.Text ~= DISPLAY_TEXT then
+                        label.Text = DISPLAY_TEXT
+                    end
+                end
+            end
+        end
+
+        local function scheduleSync()
+            if queued then
+                return
+            end
+
+            queued = true
+
+            task.defer(function()
+                queued = false
+                sync()
+            end)
+        end
+
+        local relevant = {
+            OverHead = true,
+            Main = true,
+            DisplayName = true,
+            TxtShadow = true,
+            Txt = true,
+        }
+
+        table.insert(
+            characterConnections,
+            character.DescendantAdded:Connect(function(object)
+                if relevant[object.Name] then
+                    scheduleSync()
+                end
+            end)
+        )
+
+        table.insert(
+            characterConnections,
+            character.DescendantRemoving:Connect(function(object)
+                if relevant[object.Name] then
+                    scheduleSync()
+                end
+            end)
+        )
+
+        sync()
+    end
+
+    local added =
+        LocalPlayer.CharacterAdded:Connect(bindCharacter)
+
+    local removing =
+        LocalPlayer.CharacterRemoving:Connect(function(character)
+            if currentCharacter == character then
+                clearCharacter()
+            end
+        end)
+
+    MacUI:OnUnload(function()
+        alive = false
+        added:Disconnect()
+        removing:Disconnect()
+        clearCharacter()
+    end)
+
+    if LocalPlayer.Character then
+        bindCharacter(LocalPlayer.Character)
+    end
+end
 
 -- Anti AFK: เปิดตลอดขณะที่ Zero X ทำงาน
 do
@@ -140,11 +330,80 @@ MacUI:AddTheme("Rose", {
 	SegmentBg = rgb(240, 225, 231),
 }, "Light")
 
+local Window
+
+-- In-Game: แสดง Cursor และปลดล็อกเมาส์
+do
+    local input = game:GetService("UserInputService")
+    local runService = game:GetService("RunService")
+    local mouse = LocalPlayer:GetMouse()
+    local alive = true
+    local saved
+
+    local binding = "ZeroXInGameCursor_"
+        .. game:GetService("HttpService"):GenerateGUID(false)
+
+    local function restore()
+        if not saved then return end
+
+        input.MouseIconEnabled = saved.IconEnabled
+        input.MouseBehavior = saved.Behavior
+        mouse.Icon = saved.Icon
+        saved = nil
+    end
+
+    local function updateCursor()
+        if not alive then return end
+
+        if not ZeroXContext.IsMatch()
+            or not input.MouseEnabled
+            or not Window
+            or Window.Shown ~= true then
+
+            restore()
+            return
+        end
+
+        if not saved then
+            saved = {
+                IconEnabled = input.MouseIconEnabled,
+                Behavior = input.MouseBehavior,
+                Icon = mouse.Icon,
+            }
+        end
+
+        if not input.MouseIconEnabled then
+            input.MouseIconEnabled = true
+        end
+
+        if input.MouseBehavior ~= Enum.MouseBehavior.Default then
+            input.MouseBehavior = Enum.MouseBehavior.Default
+        end
+
+        -- แสดงลูกศรเริ่มต้น
+        if mouse.Icon ~= "" then
+            mouse.Icon = ""
+        end
+    end
+
+    runService:BindToRenderStep(
+        binding,
+        Enum.RenderPriority.Last.Value + 1,
+        updateCursor
+    )
+
+    MacUI:OnUnload(function()
+        alive = false
+        runService:UnbindFromRenderStep(binding)
+        restore()
+    end)
+end
+
 --------------------------------------------------------------------------------
 -- Window: original theme, accent, layout and sizing retained.
 --------------------------------------------------------------------------------
 
-local Window = MacUI:CreateWindow({
+Window = MacUI:CreateWindow({
 	Title = "Zero X",
 	SubTitle = "",
 	Icon = "command", -- Lucide icon name, rbxassetid:// or a number
@@ -155,7 +414,10 @@ local Window = MacUI:CreateWindow({
 	Theme = "Dark", -- "Dark" | "Light" | "Midnight" | "Ocean" | "Rose"
 	Accent = "Blue", -- accent name, hex string or Color3
 	SidebarStyle = "Tile", -- "Tile" | "Tinted" | "Plain"
-	Profile = { Title = LocalPlayer.DisplayName, Subtitle = "@" .. LocalPlayer.Name }, -- or true
+	Profile = {
+		Title = "ZeroX Script Hub",
+		Subtitle = "",
+	},
 	MinimizeKey = Enum.KeyCode.RightControl,
 	Acrylic = false, -- frosted-glass sidebar (graphics quality 8+)
 	KeybindList = false, -- floating list of keybinds and shortcuts
@@ -576,55 +838,67 @@ do
 end
 
 -- Pages
-local Tabs = {
-    Lobby = Window:AddTab({
-        Title = "Lobby",
-        Icon = "log-in",
-        Section = "Lobby",
-    }),
+local Tabs = {}
 
-    InGame = Window:AddTab({
-        Title = "In-Game",
-        Icon = "swords",
-        Section = "In-Game",
-    }),
+Tabs.Home = Window:AddTab({
+    Title = "Home",
+    Icon = "home",
+    Section = "Overview",
+})
 
-    Gacha = Window:AddTab({
-        Title = "Gacha",
-        Icon = "sparkles",
-        Section = "Gacha",
-    }),
+Tabs.Lobby = Window:AddTab({
+    Title = "Lobby",
+    Icon = "log-in",
+    Section = "Gameplay",
+})
 
-    Progress = Window:AddTab({
-        Title = "Progress",
-        Icon = "trending-up",
-        Section = "Progress",
-    }),
+Tabs.InGame = Window:AddTab({
+    Title = "In-Game",
+    Icon = "swords",
+    Section = "Gameplay",
+})
 
-    Crafting = Window:AddTab({
-        Title = "Crafting",
-        Icon = "hammer",
-        Section = "Crafting",
-    }),
+Tabs.Card = Window:AddTab({
+    Title = "Card",
+    Icon = "layers",
+    Section = "Gameplay",
+})
 
-    Player = Window:AddTab({
-        Title = "Player",
-        Icon = "user",
-        Section = "Player",
-    }),
+Tabs.Gacha = Window:AddTab({
+    Title = "Gacha",
+    Icon = "sparkles",
+    Section = "Character",
+})
 
-    Appearance = Window:AddTab({
-        Title = "Settings",
-        Icon = "palette",
-        Section = "Settings",
-    }),
+Tabs.Progress = Window:AddTab({
+    Title = "Progress",
+    Icon = "trending-up",
+    Section = "Character",
+})
 
-    Profiles = Window:AddTab({
-        Title = "Profiles",
-        Icon = "folder",
-        Section = "Profiles",
-    }),
-}
+Tabs.Crafting = Window:AddTab({
+    Title = "Crafting",
+    Icon = "hammer",
+    Section = "Character",
+})
+
+Tabs.Player = Window:AddTab({
+    Title = "Player",
+    Icon = "user",
+    Section = "System",
+})
+
+Tabs.Appearance = Window:AddTab({
+    Title = "Settings",
+    Icon = "palette",
+    Section = "System",
+})
+
+Tabs.Profiles = Window:AddTab({
+    Title = "Profiles",
+    Icon = "folder",
+    Section = "System",
+})
 
 --------------------------------------------------------------------------------
 -- ZERO X: Uniform section styling
@@ -830,8 +1104,403 @@ do
     end
 end
 
--- เปิด Lobby เป็นหน้าแรกแทน Home
-Tabs.Lobby:Select()
+Tabs.Home:Select()
+
+--------------------------------------------------------------------------------
+-- HOME: Character / Account Status
+--------------------------------------------------------------------------------
+do
+    local RS = game:GetService("ReplicatedStorage")
+
+    local alive = true
+    local accountNS
+    local traits
+    local traitRetryAt = 0
+
+    local cards = {}
+    local lastText = {}
+
+    local overview = Tabs.Home:AddSection({
+        Title = "Account Status",
+        Description = "ตัวละครที่สวมใส่ สถานที่ปัจจุบัน และทรัพยากรในบัญชี",
+        Icon = "user",
+    })
+
+    local summary = overview:AddParagraph({
+        Title = "Account",
+        Content = "รอข้อมูลบัญชี",
+    })
+
+    local characters = Tabs.Home:AddSection({
+        Title = "Character Status",
+        Description = "ตัวละครแต่ละ Slot พร้อม Evo, Trait, XP และ Skill Tree; อัปเดตเมื่อเปิดหน้า Home",
+        Icon = "users",
+    })
+
+    local function write(paragraph, text)
+        if lastText[paragraph] ~= text then
+            lastText[paragraph] = text
+            paragraph:SetContent(text)
+        end
+    end
+
+    local function readModule(path)
+        local node = RS
+
+        for _, name in ipairs(path) do
+            node = node:FindFirstChild(name)
+
+            if not node then
+                return nil
+            end
+        end
+
+        assert(
+            node:IsA("ModuleScript"),
+            "Expected ModuleScript"
+        )
+
+        return require(node)
+    end
+
+    local function loadTraits()
+        if traits or os.clock() < traitRetryAt then
+            return
+        end
+
+        traitRetryAt = os.clock() + 10
+
+        local config = readModule({
+            "assets", "config", "Traits", "traitConfig",
+        })
+
+        if type(config) ~= "table" then
+            return
+        end
+
+        local byId = {}
+
+        for _, def in pairs(config) do
+            if type(def) == "table"
+                and type(def.Id) == "number"
+                and type(def.Name) == "string" then
+
+                byId[def.Id] = def
+            end
+        end
+
+        traits = byId
+    end
+
+    local function traitText(info)
+        local id = type(info.TraitData) == "table"
+            and info.TraitData.Trait
+
+        if type(id) ~= "number" then
+            return "รอข้อมูล"
+        end
+
+        if id == 0 then
+            return "ไม่มี Trait"
+        end
+
+        local def = traits and traits[id]
+
+        if not def then
+            return "ID " .. id .. " (ยังไม่มีชื่อจาก Config)"
+        end
+
+        local rarity = def.Rarity == "Exotic"
+            and "MYTHIC" or def.Rarity
+
+        return def.Name .. (
+            type(rarity) == "string"
+                and " [" .. rarity .. "]"
+                or ""
+        )
+    end
+
+    local function render()
+        accountNS = accountNS or readModule({
+            "global", "stores", "accountNamespace",
+        })
+
+        if not accountNS then
+            write(summary, "รอ accountNamespace")
+            return
+        end
+
+        local account = accountNS.getLocalPlayerAccount()
+
+        if not account then
+            write(summary, "รอข้อมูลบัญชี")
+            return
+        end
+
+        local data = account:toTable()
+
+        if type(data) ~= "table"
+            or type(data.UnlockedCharacters) ~= "table" then
+
+            write(summary, "รอข้อมูล Slot")
+            return
+        end
+
+        -- ชื่อ Trait เป็นข้อมูลเสริม ไม่ให้ขัดขวางส่วนอื่น
+        local ok, err = pcall(loadTraits)
+
+        local lines = {
+            "ZeroX Script Hub",
+
+            "สถานที่: " .. (
+                ZeroXContext.IsLobby() and "Lobby"
+                or ZeroXContext.IsMatch() and "In-Game"
+                or tostring(game.PlaceId)
+            ),
+
+            "กำลังสวมใส่: " .. (
+                type(data.character) == "string"
+                    and data.character
+                    or "รอข้อมูล"
+            ),
+        }
+
+        if type(data.currencies) == "table" then
+            local keys = {}
+
+            for key, value in pairs(data.currencies) do
+                if type(value) == "number" then
+                    table.insert(keys, key)
+                end
+            end
+
+            table.sort(keys, function(a, b)
+                return tostring(a) < tostring(b)
+            end)
+
+            for _, key in ipairs(keys) do
+                table.insert(
+                    lines,
+                    tostring(key)
+                        .. ": "
+                        .. tostring(data.currencies[key])
+                )
+            end
+        else
+            table.insert(lines, "ทรัพยากร: รอข้อมูล")
+        end
+
+        if not ok then
+            table.insert(
+                lines,
+                "อ่านชื่อ Trait ไม่สำเร็จ: " .. tostring(err)
+            )
+        end
+
+        local rows = {}
+        local present = {}
+        local unlocked = 0
+        local unique = {}
+
+        for key, slot in pairs(data.UnlockedCharacters) do
+            local index = type(key) == "string"
+                and tonumber(key:match("^Slot(%d+)$"))
+
+            if index and type(slot) == "table" then
+                table.insert(rows, {
+                    index = index,
+                    slot = slot,
+                })
+
+                present[index] = true
+
+                if slot.Unlocked == true then
+                    unlocked += 1
+
+                    if type(slot.Character) == "string"
+                        and slot.Character ~= "" then
+
+                        unique[slot.Character] = true
+                    end
+                end
+            end
+        end
+
+        table.sort(rows, function(a, b)
+            return a.index < b.index
+        end)
+
+        local count = 0
+
+        for _ in pairs(unique) do
+            count += 1
+        end
+
+        table.insert(
+            lines,
+            "Slot ปลดล็อก: " .. unlocked .. "/" .. #rows
+        )
+
+        table.insert(
+            lines,
+            "ตัวละครไม่ซ้ำใน Slot: " .. count
+        )
+
+        write(summary, table.concat(lines, "\n"))
+
+        for _, row in ipairs(rows) do
+            local index = row.index
+            local slot = row.slot
+
+            if not cards[index] then
+                cards[index] = characters:AddParagraph({
+                    Title = "Slot " .. index,
+                    Content = "รอข้อมูล",
+                })
+            end
+
+            local text
+
+            if slot.Unlocked == false then
+                text = "ยังไม่ปลดล็อก"
+
+            elseif slot.Unlocked ~= true then
+                text = "รอสถานะปลดล็อก"
+
+            elseif type(slot.Character) ~= "string"
+                or slot.Character == "" then
+
+                text = "ไม่มีตัวละคร"
+
+            else
+                local key = slot.Character
+
+                local info = type(data.CharactersData) == "table"
+                    and data.CharactersData[key]
+
+                local details = {
+                    "Character: " .. key .. (
+                        data.character == key
+                            and " [สวมใส่อยู่]"
+                            or ""
+                    ),
+                }
+
+                if type(info) == "table" then
+                    local evo = info.IsUltimateUnlocked
+
+                    table.insert(
+                        details,
+                        "Evo: " .. (
+                            evo == true and "Evo แล้ว"
+                            or evo == false and "ยังไม่ Evo"
+                            or "รอข้อมูล"
+                        )
+                    )
+
+                    table.insert(
+                        details,
+                        "Trait: " .. traitText(info)
+                    )
+
+                    local progress = info.Progression
+
+                    if type(progress) == "table" then
+                        table.insert(
+                            details,
+                            "XP: " .. (
+                                type(progress.Xp) == "number"
+                                    and tostring(progress.Xp)
+                                    or "รอข้อมูล"
+                            )
+                        )
+
+                        if type(progress.Skills) == "table" then
+                            local branches = {}
+
+                            for branch, tier in pairs(progress.Skills) do
+                                table.insert(
+                                    branches,
+                                    tostring(branch)
+                                        .. ": Tier "
+                                        .. tostring(tier)
+                                )
+                            end
+
+                            table.sort(branches)
+
+                            table.insert(
+                                details,
+                                "Skill Tree: " .. (
+                                    #branches > 0
+                                        and table.concat(branches, " | ")
+                                        or "ไม่มีรายการ"
+                                )
+                            )
+                        end
+                    end
+
+                    if key == "sung_jinwoo" then
+                        local achievement = data.achievements
+
+                        local stage = type(achievement) == "table"
+                            and type(achievement.progress) == "table"
+                            and achievement.progress["evo.sung_jinwoo"]
+
+                        table.insert(
+                            details,
+                            "Monarch Stage: " .. (
+                                type(stage) == "number"
+                                    and tostring(stage)
+                                    or "รอข้อมูล"
+                            )
+                        )
+                    end
+                else
+                    table.insert(
+                        details,
+                        "Evo / Trait / Progression: รอข้อมูล"
+                    )
+                end
+
+                text = table.concat(details, "\n")
+            end
+
+            write(cards[index], text)
+        end
+
+        for index, card in pairs(cards) do
+            if not present[index] then
+                write(
+                    card,
+                    "ไม่พบข้อมูล Slot ใน Account ปัจจุบัน"
+                )
+            end
+        end
+    end
+
+    MacUI:OnUnload(function()
+        alive = false
+    end)
+
+    task.spawn(function()
+        while alive do
+            -- อ่าน Account ทุก 2 วินาที เฉพาะเมื่อเปิดหน้า Home
+            if Window.Shown and Tabs.Home.Selected then
+                local ok, err = pcall(render)
+
+                if not ok then
+                    write(
+                        summary,
+                        "อ่าน Status ไม่สำเร็จ: " .. tostring(err)
+                    )
+                end
+            end
+
+            task.wait(2)
+        end
+    end)
+end
 
 --------------------------------------------------------------------------------
 -- ADD YOUR FEATURES HERE
@@ -1600,6 +2269,26 @@ do
                                 DropKey = "sololevelingraid",
                                 Mode = "sololevelingraid",
                             },
+                            {
+                                Id = "Fate",
+                                DisplayName = "Evil Reflection",
+                                DropKey = "fateraid",
+                                Mode = "fateraid",
+                            },
+                        },
+                    },
+                    Escape = {
+                        Id = "Escape",
+                        DisplayName = "Tidal High Rise",
+                        FixedDifficulty = 4,
+
+                        Maps = {
+                            {
+                                Id = "Flood",
+                                DisplayName = "Tidal High Rise",
+                                DropKey = "floodescape",
+                                Mode = "floodescape",
+                            },
                         },
                     },
                     Trials = {
@@ -1715,6 +2404,7 @@ do
                 Infinite = true,
                 Raid = true,
                 Trials = true,
+                Escape = true,
             }
 
             local modes = {}
@@ -1736,6 +2426,59 @@ do
             table.sort(modeIds)
             assert(#modeIds > 0, "No supported Modes found")
 
+            -- ใช้ DisplayName จาก Config จริงก่อน
+            -- ชื่อสำรองใช้เมื่ออยู่นอก Lobby ตามรายงานที่ยืนยันแล้ว
+            local verifiedModeNames = {
+                Story = "Story",
+                Infinite = "Infinite",
+                Raid = "Raid",
+                Trials = "Trials",
+                Escape = "Tidal High Rise",
+            }
+
+            local verifiedMapNames = {
+                Hxh = "Hxh",
+                Zzz = "ZZZ World",
+                BathTub = "Spirit's Bathtub",
+                ShadowGate = "Shadow Gate",
+                Fate = "Evil Reflection",
+                Trials = "Trials",
+                Flood = "Tidal High Rise",
+            }
+
+            local function DisplayName(definition, verified)
+                local name = definition.DisplayName
+
+                if type(name) == "string" and name ~= "" then
+                    return name
+                end
+
+                return verified[definition.Id] or definition.Id
+            end
+
+            local modeLabels = {}
+            local modeLabelById = {}
+
+            for _, id in ipairs(modeIds) do
+                local definition = modes[id]
+                local label = DisplayName(
+                    definition,
+                    verifiedModeNames
+                )
+
+                assert(
+                    not modes[label] or modes[label] == definition,
+                    "Duplicate Mode display name: " .. label
+                )
+
+                -- รองรับทั้งชื่อที่แสดงและ ID ที่ระบบเดิมใช้อยู่
+                modeLabelById[id] = label
+                modes[label] = definition
+                table.insert(modeLabels, label)
+            end
+
+            table.sort(modeLabels)
+
             -- Mapping ยืนยันจาก Handler ตามรายงานตรวจสอบ
             local difficultyNames = {
                 "Easy", "Medium", "Hard", "Nightmare",
@@ -1744,6 +2487,7 @@ do
             local modeControl
             local mapControl
             local chapterControl
+            local chapterIdsByLabel = {}
             local difficultyControl
             local syncQueued = false
             local syncing = false
@@ -1757,18 +2501,40 @@ do
                         and type(map.Id) == "string"
                         and map.Id ~= "" then
 
-                        assert(not lookup[map.Id],
-                            "Duplicate Map ID: " .. map.Id)
+                        assert(
+                            not lookup[map.Id],
+                            "Duplicate Map ID: " .. map.Id
+                        )
 
                         lookup[map.Id] = map
                         table.insert(ids, map.Id)
                     end
                 end
 
-                table.sort(ids)
                 assert(#ids > 0, "No Maps: " .. mode.Id)
 
-                return ids, lookup
+                local labels = {}
+
+                for _, id in ipairs(ids) do
+                    local map = lookup[id]
+                    local label = DisplayName(
+                        map,
+                        verifiedMapNames
+                    )
+
+                    assert(
+                        not lookup[label] or lookup[label] == map,
+                        "Duplicate Map display name: " .. label
+                    )
+
+                    -- ชื่อใน Dropdown และ ID ชี้ไปที่ Map เดียวกัน
+                    lookup[label] = map
+                    table.insert(labels, label)
+                end
+
+                table.sort(labels)
+
+                return labels, lookup
             end
 
             local function SetChoices(control, values)
@@ -1799,29 +2565,62 @@ do
                 assert(map, "Selected Map unavailable")
 
                 local chapters = {}
+                chapterIdsByLabel = {}
 
-                if type(map.Chapters) == "table" then
-                    for _, value in ipairs(map.Chapters) do
+                if map.Floors == true then
+                    -- เกมไม่มี Act list สำหรับ Trials
+                    chapters = { "Floors" }
+                    chapterIdsByLabel.Floors = 0
+                else
+                    -- ชื่อ fallback ตาม Handler ของเกม
+                    local actTitles = {
+                        Story = "Story",
+                        Defend = "Defense",
+                        Infinite = "Endless Waves",
+                        Raid = "Raid",
+                    }
+
+                    for _, value in ipairs(map.Chapters or { 1 }) do
                         local chapter = tonumber(value)
 
-                        assert(chapter and chapter % 1 == 0
-                            and chapter >= 1 and chapter <= 127,
-                            "Invalid Chapter in config")
+                        assert(
+                            chapter and chapter % 1 == 0
+                                and chapter >= 1 and chapter <= 127,
+                            "Invalid Chapter in config"
+                        )
 
-                        local label = tostring(chapter)
+                        local title = type(map.ActNames) == "table"
+                            and map.ActNames[chapter]
 
-                        if not table.find(chapters, label) then
+                        if type(title) ~= "string" or title == "" then
+                            title = actTitles[mode.Id]
+                                or mode.DisplayName
+                                or verifiedModeNames[mode.Id]
+                                or mode.Id
+                        end
+
+                        assert(
+                            type(title) == "string" and title ~= "",
+                            "Invalid Act title"
+                        )
+
+                        local label = ("Act %d - %s"):format(
+                            chapter,
+                            title
+                        )
+
+                        if chapterIdsByLabel[label] == nil then
+                            chapterIdsByLabel[label] = chapter
                             table.insert(chapters, label)
                         end
                     end
 
-                    table.sort(chapters, function(a, b)
-                        return tonumber(a) < tonumber(b)
-                    end)
-
                     assert(#chapters > 0, "Empty Chapters config")
-                else
-                    chapters = { "0" }
+
+                    table.sort(chapters, function(left, right)
+                        return chapterIdsByLabel[left]
+                            < chapterIdsByLabel[right]
+                    end)
                 end
 
                 SetChoices(chapterControl, chapters)
@@ -1857,8 +2656,8 @@ do
             modeControl = Section:AddDropdown("ZeroXLobbyMode", {
                 Title = "Mode",
                 Description = "เลือกประเภทการเล่น เช่น Story, Infinite, Raid หรือ Trials",
-                Values = modeIds,
-                Default = modes.Story and "Story" or modeIds[1],
+                Values = modeLabels,
+                Default = modeLabelById.Story or modeLabels[1],
                 Callback = ScheduleSync,
             })
 
@@ -1872,9 +2671,9 @@ do
 
             chapterControl = Section:AddDropdown("ZeroXLobbyChapter", {
                 Title = "Chapter",
-                Description = "เลือกบทที่จะเล่นในแมป ค่า 0 หมายถึงโหมดนี้ไม่ใช้ Chapter",
-                Values = { "0" },
-                Default = "0",
+                Description = "เลือก Act ตามชื่อที่เกมแสดง; Trials ใช้ Floors",
+                Values = {},
+                AllowNull = true,
             })
 
             difficultyControl = Section:AddDropdown("ZeroXLobbyDifficulty", {
@@ -1919,7 +2718,7 @@ do
                     local hitbox = room:FindFirstChild("JoinHitbox")
 
                     if number and number % 1 == 0
-                        and number >= 1 and number <= 6
+                        and number >= 1 and number <= 8
                         and inside and inside:IsA("BasePart")
                         and hitbox and hitbox:IsA("BasePart") then
 
@@ -1971,7 +2770,7 @@ do
 
                 assert(map, "Selected Map unavailable")
 
-                if mode.Id == "Raid" then
+                do
                     local raidKey = map.Mode or map.DropKey
 
                     if raidKey ~= nil then
@@ -2020,10 +2819,18 @@ do
                     and difficulty >= 1 and difficulty <= 4,
                     "Invalid Difficulty")
 
-                local chapter = map.Chapters
-                    and tonumber(
-                        craft and craft.Chapter or chapterControl.Value
-                    ) or 0
+                local chapter = 0
+
+                if map.Chapters then
+                    if craft then
+                        -- เส้นทาง Craft / Evolve ใช้ ID เดิม
+                        chapter = tonumber(craft.Chapter)
+                    else
+                        chapter =
+                            chapterIdsByLabel[chapterControl.Value]
+                            or tonumber(chapterControl.Value)
+                    end
+                end
 
                 assert(chapter and chapter % 1 == 0
                     and chapter >= 0 and chapter <= 127,
@@ -2802,7 +3609,7 @@ do
             local now = os.clock()
             if now - (warningAt[key] or -math.huge) >= 5 then
                 warningAt[key] = now
-                getfenv().warn("[Zero X / Auto Farm]", message, ...)
+                warn("[Zero X / Auto Farm]", message, ...)
             end
         end
 
@@ -3096,6 +3903,20 @@ do
             and isInRaid() == true
     end
 
+    local function isFateRaid()
+        return workspace:GetAttribute("Mode") == "fateraid"
+    end
+
+    local function isRaidBossGuarded()
+        return (isShadowGateRaid() or isFateRaid()) and (
+            workspace:GetAttribute("RaidBossGuarded") == true
+            or (
+                tonumber(workspace:GetAttribute("RaidOathCount"))
+                or 0
+            ) > 0
+        )
+    end
+
     local farmRunStore = nil
 
     local function getLiveFarmArea()
@@ -3141,8 +3962,8 @@ do
             return getLiveFarmArea() or area
         end
 
-        if isShadowGateRaid() then
-            return "1"
+        if isShadowGateRaid() or isFateRaid() then
+            return getLiveFarmArea() or "1"
         end
 
         return "Infinite"
@@ -3209,9 +4030,159 @@ do
         return root
     end
 
-    --==================================================
-    -- Find Target
-    --==================================================
+    local fateEnemyModules
+
+    local function readFateEnemy(enemy)
+        if not enemy or not enemy:IsA("Model") then
+            return nil
+        end
+
+        local id = tonumber(enemy.Name)
+
+        if not id then
+            return nil
+        end
+
+        if not fateEnemyModules then
+            local store = RuntimeFix.requireModule(
+                ReplicatedStorage,
+                { "game", "stores", "enemyStore" }
+            )
+
+            local definitions = RuntimeFix.requireModule(
+                ReplicatedStorage,
+                { "global", "constants", "enemies" }
+            )
+
+            assert(
+                store.store and store.store.state,
+                "Fate enemyStore unavailable"
+            )
+
+            assert(
+                type(definitions.enemiesByName) == "table",
+                "Fate enemiesByName unavailable"
+            )
+
+            fateEnemyModules = {
+                state = store.store.state,
+                definitions = definitions.enemiesByName,
+            }
+        end
+
+        local state = fateEnemyModules.state
+        local entry
+
+        if type(state.get) == "function" then
+            entry = state:get(id)
+        elseif state.entries then
+            entry = state.entries[id]
+        end
+
+        if not entry or not entry.name
+            or type(entry.name.get) ~= "function" then
+
+            return nil
+        end
+
+        local key = entry.name:get()
+
+        if type(key) ~= "string" then
+            return nil
+        end
+
+        local definition = fateEnemyModules.definitions[key]
+
+        if type(definition) ~= "table" then
+            return nil
+        end
+
+        return key, definition.boss == true
+    end
+
+    local function getFateTarget(areaName)
+        local enemies = workspace:FindFirstChild("enemies")
+        local root = getCharacterRoot()
+
+        if not enemies or not root
+            or not getAreaPart(areaName) then
+
+            return nil
+        end
+
+        local guarded = isRaidBossGuarded()
+
+        local oath
+        local minion
+        local boss
+
+        local oathDistance = math.huge
+        local minionDistance = math.huge
+        local bossDistance = math.huge
+
+        for _, enemy in ipairs(enemies:GetChildren()) do
+            if not enemy:IsA("Model")
+                or not isEnemyAlive(enemy) then
+
+                continue
+            end
+
+            local enemyRoot = getEnemyRoot(enemy)
+
+            if not enemyRoot then
+                continue
+            end
+
+            local area = getAreaByPosition(enemyRoot.Position)
+
+            if not area
+                or tostring(area.Name) ~= tostring(areaName) then
+
+                continue
+            end
+
+            local key, isBoss = readFateEnemy(enemy)
+
+            -- ข้อมูลยังไม่มา ให้รอ ไม่เดาจาก HP/Shield
+            if not key then
+                continue
+            end
+
+            local distance =
+                (root.Position - enemyRoot.Position).Magnitude
+
+            if guarded and key == "fateOath"
+                and distance < oathDistance then
+
+                oath = enemy
+                oathDistance = distance
+            end
+
+            if isBoss then
+                if distance < bossDistance then
+                    boss = enemy
+                    bossDistance = distance
+                end
+            elseif distance < minionDistance then
+                minion = enemy
+                minionDistance = distance
+            end
+        end
+
+        if oath then
+            return oath
+        end
+
+        if minion then
+            return minion
+        end
+
+        if not guarded then
+            return boss
+        end
+
+        return nil
+    end
 
     local KnownBossNames = {
         spiritedkaonashi = true,
@@ -3231,6 +4202,11 @@ do
 
     local function isEnemyBoss(enemy: Instance): boolean
         if not enemy then return false end
+
+        if isFateRaid() then
+            local _, boss = readFateEnemy(enemy)
+            return boss == true
+        end
 
         -- 1. Check custom attributes or tags on Model
         if enemy:GetAttribute("Boss") == true or enemy:GetAttribute("IsBoss") == true then
@@ -3329,6 +4305,10 @@ do
     end
 
     local function getNearestEnemyInArea(areaName)
+        if isFateRaid() then
+            return getFateTarget(areaName)
+        end
+
         local enemies = workspace:FindFirstChild("enemies")
 
         if not enemies then
@@ -3628,6 +4608,16 @@ do
 
     -- โหมดทดลอง: ร่างจริงอยู่เหนือมอน ร่างปลอมอยู่ใกล้มอน
     local function stopHover()
+        RuntimeFix.FloodHolding = nil
+
+        if RuntimeFix.FloodPrompt then
+            pcall(function()
+                RuntimeFix.FloodPrompt:InputHoldEnd()
+            end)
+
+            RuntimeFix.FloodPrompt = nil
+        end
+
         if RuntimeFix.RootTweenCleanup then
             RuntimeFix.RootTweenCleanup()
         end
@@ -3899,9 +4889,14 @@ do
                 )
         end
 
+        local floodContext =
+            RuntimeFix.isFlood() and RuntimeFix.floodKey()
+
+        -- ค่าตำแหน่งตอนใช้สกิล
         local TARGET_TWEEN_DISTANCE = 100
         local useBathTween =
             workspace:GetAttribute("Mode") == "spiritedawayraid"
+            or RuntimeFix.isFlood()
 
         -- เก็บก่อน stopHover ล้าง CurrentTarget
         local changingTarget =
@@ -3921,7 +4916,7 @@ do
         local offset = root.Position - enemyRoot.Position
         local angle = math.atan2(offset.Z, offset.X)
 
-        local function getPosition(targetRoot, usingSkill)
+        local function getRawPosition(targetRoot, usingSkill)
             local center = targetRoot.Position
 
             -- คงตำแหน่งถอยฟื้นเลือดเดิม
@@ -3982,6 +4977,21 @@ do
             )
         end
 
+        local function getPosition(targetRoot, usingSkill)
+            local position = RuntimeFix.floodSafe(
+                getRawPosition(targetRoot, usingSkill)
+            )
+
+            local gate = RuntimeFix.FloodCombatGate
+
+            if gate and gate.Parent then
+                return RuntimeFix.floodGatePosition(position, gate)
+                    or RuntimeFix.floodSafe(gate.Position)
+            end
+
+            return position
+        end
+
         local function getFacing(position, center)
             local direction = center - position
 
@@ -4026,7 +5036,11 @@ do
                     function()
                         local targetRoot = getEnemyRoot(enemy)
 
-                        if CurrentTarget ~= enemy
+                        if (
+                            floodContext
+                            and RuntimeFix.floodKey() ~= floodContext
+                        )
+                            or CurrentTarget ~= enemy
                             or not isEnemyAlive(enemy)
                             or not targetRoot
                             or not targetRoot.Parent
@@ -4034,10 +5048,18 @@ do
                             return false
                         end
 
-                        -- ตรวจระหว่าง Tween ไปหาบอส Shadow Gate
+                        -- ตรวจระหว่าง Tween ไปหาบอส Shadow Gate หรือ Fate
                         if not retreatMode
-                            and isShadowGateRaid()
-                            and isShadowGateMainBoss(enemy)
+                            and (
+                                (
+                                    isShadowGateRaid()
+                                    and isShadowGateMainBoss(enemy)
+                                )
+                                or (
+                                    isFateRaid()
+                                    and isEnemyBoss(enemy)
+                                )
+                            )
                         then
                             local hasMinions = CurrentAreaName ~= nil
                                 and hasMinionsAliveInArea(CurrentAreaName)
@@ -4144,7 +5166,11 @@ do
                 return
             end
 
-            if AutoFarmSession.Cancelled
+            if (
+                floodContext
+                and RuntimeFix.floodKey() ~= floodContext
+            )
+                or AutoFarmSession.Cancelled
                 or not AutoFarmEnabled
                 or getCharacter() ~= character
                 or not root.Parent
@@ -4199,6 +5225,25 @@ do
 
             local center = currentEnemyRoot.Position
             local targetPosition = getPosition(currentEnemyRoot, usingSkill)
+
+            -- ดึงกลับเข้าเขตเฉพาะเมื่อถูกผลักหรือสกิลพาออกไป
+            local gate = RuntimeFix.FloodCombatGate
+
+            if gate and gate.Parent
+                and (root.Position - gate.Position).Magnitude > 18 then
+
+                local bounded = RuntimeFix.floodGatePosition(
+                    root.Position,
+                    gate
+                )
+
+                if bounded then
+                    root.CFrame =
+                        CFrame.new(bounded) * root.CFrame.Rotation
+
+                    root.AssemblyLinearVelocity = Vector3.zero
+                end
+            end
 
             positionAlign.Position = targetPosition
 
@@ -4935,6 +5980,31 @@ do
         return position
     end
 
+    function RuntimeFix.skillIssue(reason, detail)
+        RuntimeFix.AutoSkillLastIssue =
+            reason .. " | " .. tostring(detail or "")
+
+        if not AUTO_SKILL_DEBUG then return end
+
+        RuntimeFix.SkillWarningAt =
+            RuntimeFix.SkillWarningAt or {}
+
+        local now = os.clock()
+
+        if now - (
+            RuntimeFix.SkillWarningAt[reason] or -math.huge
+        ) < 5 then
+            return
+        end
+
+        RuntimeFix.SkillWarningAt[reason] = now
+
+        AutoSkillWarn(
+            "[Zero X / Auto Skill] "
+                .. RuntimeFix.AutoSkillLastIssue
+        )
+    end
+
     local function isGameSkillBusy()
         local ok, busy = pcall(function()
             local scripts = LocalPlayer:FindFirstChild("PlayerScripts")
@@ -4985,9 +6055,12 @@ do
             return DirectCharacterController
         end
 
-        -- ไม่เขียนทับหากระบบอื่นแก้ API ไปแล้ว
+        -- Reference เปลี่ยน: โหลดและผูกใหม่ผ่าน retry เดิม
         if PatchedInputController then
-            return nil
+            DirectCharacterController = nil
+            PatchedInputController = nil
+            OriginalGetAimPoint = nil
+            AimPointReplacement = nil
         end
 
         if os.clock() < NextSkillAPICheck then
@@ -5025,7 +6098,7 @@ do
             or not inputModule
             or not inputModule:IsA("ModuleScript")
         then
-            warn("[AutoSkill] Controller modules unavailable")
+            RuntimeFix.skillIssue("Controller modules unavailable")
             return nil
         end
 
@@ -5041,7 +6114,11 @@ do
             or type(inputController) ~= "table"
             or type(inputController.getAimPoint) ~= "function"
         then
-            warn("[AutoSkill] Direct Skill API unavailable")
+            RuntimeFix.skillIssue(
+                "Direct Skill API unavailable",
+                not ok and characterController
+                    or "ตรวจ performSkill / getAimPoint"
+            )
             return nil
         end
 
@@ -5105,7 +6182,10 @@ do
         end)
 
         if not patched then
-            warn("[AutoSkill] Aim API patch failed:", patchError)
+            RuntimeFix.skillIssue(
+                "Aim API patch failed",
+                patchError
+            )
             return nil
         end
 
@@ -5121,7 +6201,7 @@ do
                 return
             end
 
-            getfenv().warn(
+            warn(
                 "[AutoAimCheck] getAimPoint calls:",
                 RuntimeFix.AutoAimReadCount or 0
             )
@@ -5169,9 +6249,12 @@ do
             RuntimeFix.MouseAimPatch = patch
         end
 
-        if patch.Module then
-            return patch.Module.Get == patch.Replacement
+        if patch.Module
+            and patch.Module.Get == patch.Replacement then
+            return true
         end
+
+        -- หาก reference เปลี่ยน ให้ลองผูกใหม่ผ่าน NextAttempt
 
         if AutoFarmSession.Cancelled
             or os.clock() < patch.NextAttempt
@@ -5249,7 +6332,7 @@ do
                 if not patch.InvalidResultLogged then
                     patch.InvalidResultLogged = true
 
-                    local logger = getfenv().warn
+                    local logger = warn
 
                     if type(logger) == "function" then
                         logger(
@@ -5273,7 +6356,7 @@ do
             if not state.MouseAimLogged then
                 state.MouseAimLogged = true
 
-                local logger = getfenv().warn
+                local logger = warn
 
                 if type(logger) == "function" then
                     logger(
@@ -5291,7 +6374,7 @@ do
         end)
 
         if not assigned then
-            local logger = getfenv().warn
+            local logger = warn
 
             if type(logger) == "function" then
                 logger(
@@ -5307,18 +6390,24 @@ do
         patch.Original = original
         patch.Replacement = replacement
 
-        -- คืนฟังก์ชันเดิมเมื่อหยุดหรือรันสคริปต์ใหม่
-        table.insert(AutoFarmSession.Cleanups, function()
-            if mouseAim.Get == replacement then
-                mouseAim.Get = original
-            end
+        -- ลงทะเบียนครั้งเดียว แม้มีการผูก API ใหม่
+        if not patch.CleanupRegistered then
+            patch.CleanupRegistered = true
 
-            if RuntimeFix.MouseAimPatch == patch then
-                RuntimeFix.MouseAimPatch = nil
-            end
-        end)
+            table.insert(AutoFarmSession.Cleanups, function()
+                if patch.Module
+                    and patch.Module.Get == patch.Replacement then
 
-        local logger = getfenv().warn
+                    patch.Module.Get = patch.Original
+                end
+
+                if RuntimeFix.MouseAimPatch == patch then
+                    RuntimeFix.MouseAimPatch = nil
+                end
+            end)
+        end
+
+        local logger = warn
 
         if type(logger) == "function" then
             logger("[AutoAim] MouseAim.Get READY")
@@ -5556,6 +6645,9 @@ do
         end
 
         if slot == 2 and not RuntimeFix.ensureMouseAimAPI() then
+            RuntimeFix.skillIssue(
+                "Skill 2 MouseAim API unavailable"
+            )
             return false
         end
 
@@ -5563,12 +6655,16 @@ do
         local controller = ensureMouseFreeSkillAPI()
 
         if not controller then
+            RuntimeFix.skillIssue(
+                "Skill controller not ready",
+                "Slot=" .. slot
+            )
             return false
         end
 
         local state = {
             skillKey = tostring(slot),
-            target = worldPosition and nil or CurrentTarget,
+            target = CurrentTarget,
             worldPosition = worldPosition,
             expires = os.clock() + (
                 slot == 2
@@ -5577,9 +6673,17 @@ do
             ),
         }
 
+        if worldPosition ~= nil then
+            state.target = nil
+        end
+
         local position = getTrackedAimPosition(state)
 
         if not position then
+            RuntimeFix.skillIssue(
+                "No valid skill target",
+                "Slot=" .. slot
+            )
             return false
         end
 
@@ -5627,18 +6731,81 @@ do
 
         -- เรียก Skill ผ่านระบบเกมโดยตรง
         -- ไม่ใช้ keypress / SendKeyEvent
-        local success, result = pcall(function()
-            return controller.performSkill(slot)
-        end)
+        local readIdentity = getthreadidentity
+        local changeIdentity = setthreadidentity
 
-        if not success then
+        if type(readIdentity) ~= "function"
+            or type(changeIdentity) ~= "function" then
+
             SkillAimState = nil
-            warn("[AutoSkill] Direct Skill failed:", result)
+
+            RuntimeFix.skillIssue(
+                "Thread identity API unavailable",
+                "ต้องมี getthreadidentity และ setthreadidentity"
+            )
+
             return false
         end
 
-        if result == false then
+        local identityOK, previousIdentity = pcall(readIdentity)
+
+        if not identityOK
+            or type(previousIdentity) ~= "number" then
+
             SkillAimState = nil
+
+            RuntimeFix.skillIssue(
+                "Cannot read thread identity",
+                previousIdentity
+            )
+
+            return false
+        end
+
+        local success, result = xpcall(function()
+            -- ใช้บริบทสคริปต์เกมเฉพาะช่วงเรียกสกิล
+            changeIdentity(2)
+
+            return controller.performSkill(slot)
+        end, function(err)
+            return debug.traceback(tostring(err), 2)
+        end)
+
+        -- คืนค่าเดิมทั้งกรณีสำเร็จและเกิด Error
+        local restored, restoreError = pcall(
+            changeIdentity,
+            previousIdentity
+        )
+
+        if not restored then
+            SkillAimState = nil
+
+            error(
+                "Auto Skill: cannot restore thread identity: "
+                    .. tostring(restoreError),
+                0
+            )
+        end
+
+        if not success then
+            SkillAimState = nil
+
+            RuntimeFix.skillIssue(
+                "performSkill exception: Slot=" .. slot,
+                result
+            )
+
+            return false
+        end
+
+        if result ~= true then
+            SkillAimState = nil
+
+            RuntimeFix.skillIssue(
+                "performSkill not accepted: Slot=" .. slot,
+                result
+            )
+
             return false
         end
 
@@ -5907,6 +7074,67 @@ do
     end
 
     local function handleRaidState()
+        -- Fate: วาร์ปเข้าจุดเริ่มต่อสู้ครั้งเดียวเมื่อพบมอน
+        if isFateRaid() then
+            local character = getCharacter()
+            local root = getCharacterRoot()
+            local humanoid = getHumanoid()
+
+            if not character
+                or not root
+                or not humanoid
+                or humanoid.Health <= 0 then
+                return true
+            end
+
+            if RuntimeFix.FateArenaCharacter == character then
+                return false
+            end
+
+            local enemies = workspace:FindFirstChild("enemies")
+            local foundEnemy = false
+
+            for _, enemy in ipairs(
+                enemies and enemies:GetChildren() or {}
+            ) do
+                if enemy:IsA("Model")
+                    and isEnemyAlive(enemy)
+                    and getEnemyRoot(enemy) then
+
+                    foundEnemy = true
+                    break
+                end
+            end
+
+            if not foundEnemy then return true end
+
+            if AutoFarmSession.Cancelled
+                or not AutoFarmEnabled then
+                return true
+            end
+
+            stopHover()
+
+            local pivotOffset = root.CFrame:ToObjectSpace(
+                character:GetPivot()
+            )
+
+            character:PivotTo(
+                CFrame.new(66, 282, -234)
+                    * root.CFrame.Rotation
+                    * pivotOffset
+            )
+
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+
+            RuntimeFix.FateArenaCharacter = character
+            CurrentAreaName = getLiveFarmArea() or "1"
+
+            -- ปล่อยให้ Auto Farm เลือกและตามมอนต่อทันที
+            return false
+        end
+
         local status = getRaidStatus()
 
         if status == "" then
@@ -6444,6 +7672,814 @@ do
     -- Start Auto Farm
     --==================================================
 
+    function RuntimeFix.floodStatus(message)
+        -- เก็บสถานะภายใน โดยไม่แสดงใน UI
+        RuntimeFix.FloodMessage = message
+    end
+
+    function RuntimeFix.isFlood()
+        return workspace:GetAttribute("Mode") == "floodescape"
+    end
+
+    function RuntimeFix.floodKey()
+        return tostring(workspace:GetAttribute("FloodFloor")) .. ":"
+            .. tostring(workspace:GetAttribute("FloodRoof")) .. ":"
+            .. tostring(workspace:GetAttribute("FloodPhase"))
+    end
+
+    function RuntimeFix.floodSafe(position)
+        local water = workspace:GetAttribute("FloodLevel")
+
+        if RuntimeFix.isFlood() and type(water) == "number" then
+            return Vector3.new(
+                position.X,
+                math.max(position.Y, water + 8),
+                position.Z
+            )
+        end
+
+        return position
+    end
+
+    function RuntimeFix.floodPoint(object)
+        if not object then return nil end
+
+        if object:IsA("BasePart") then
+            return object.Position
+        elseif object:IsA("Attachment") then
+            return object.WorldPosition
+        elseif object:IsA("Model") then
+            return object:GetPivot().Position
+        end
+
+        return nil
+    end
+
+    function RuntimeFix.floodGatePosition(position, gate)
+        if not gate
+            or not gate.Parent
+            or not gate:IsA("BasePart")
+            or not RuntimeFix.isFlood()
+            or workspace:GetAttribute("FloodPhase") ~= "block" then
+            return position
+        end
+
+        local center = gate.Position
+        local radius = 17 -- เว้นขอบจากรัศมีจริง 18 studs
+        local water = workspace:GetAttribute("FloodLevel")
+        local minY = center.Y - radius
+
+        if type(water) == "number" then
+            minY = math.max(minY, water + 8)
+        end
+
+        if minY > center.Y + radius then
+            return nil
+        end
+
+        local y = math.clamp(
+            position.Y,
+            minY,
+            center.Y + radius
+        )
+
+        local dy = y - center.Y
+        local horizontalLimit = math.sqrt(
+            math.max(0, radius * radius - dy * dy)
+        )
+
+        local offset = Vector3.new(
+            position.X - center.X,
+            0,
+            position.Z - center.Z
+        )
+
+        if offset.Magnitude > horizontalLimit then
+            offset = offset.Unit * horizontalLimit
+        end
+
+        return Vector3.new(
+            center.X + offset.X,
+            y,
+            center.Z + offset.Z
+        )
+    end
+
+    function RuntimeFix.floodHold(position)
+        local root = getCharacterRoot()
+        if not root then return false end
+
+        position = RuntimeFix.floodSafe(position)
+
+        local holding = RuntimeFix.FloodHolding
+
+        if holding
+            and holding.Root == root
+            and HoverConnection
+            and (holding.Position - position).Magnitude < 1 then
+
+            holding.Position = position
+            return true
+        end
+
+        stopHover()
+
+        local key = RuntimeFix.floodKey()
+
+        if (root.Position - position).Magnitude > 3 then
+            local arrived = RuntimeFix.tweenRootTo(
+                CFrame.new(position),
+                function()
+                    return RuntimeFix.isFlood()
+                        and RuntimeFix.floodKey() == key
+                end
+            )
+
+            if not arrived then return false end
+        end
+
+        if not AutoFarmEnabled
+            or AutoFarmSession.Cancelled
+            or not root.Parent
+            or RuntimeFix.floodKey() ~= key then
+            return false
+        end
+
+        holding = {
+            Root = root,
+            Position = position,
+        }
+
+        RuntimeFix.FloodHolding = holding
+
+        RootAttachment = Instance.new("Attachment")
+        RootAttachment.Parent = root
+
+        AlignPosition = Instance.new("AlignPosition")
+        AlignPosition.Mode = Enum.PositionAlignmentMode.OneAttachment
+        AlignPosition.Attachment0 = RootAttachment
+        AlignPosition.MaxForce = math.huge
+        AlignPosition.MaxVelocity = math.huge
+        AlignPosition.Responsiveness = POSITION_RESPONSIVENESS
+        AlignPosition.Position = position
+        AlignPosition.Parent = root
+
+        HoverConnection = RunService.Heartbeat:Connect(function()
+            local humanoid = getHumanoid()
+
+            if AutoFarmSession.Cancelled
+                or not AutoFarmEnabled
+                or RuntimeFix.EndRoundPaused
+                or getCharacterRoot() ~= root
+                or not root.Parent
+                or not humanoid
+                or humanoid.Health <= 0
+                or not RuntimeFix.isFlood()
+                or RuntimeFix.floodKey() ~= key then
+
+                stopHover()
+                return
+            end
+
+            AlignPosition.Position =
+                RuntimeFix.floodSafe(holding.Position)
+
+            root.AssemblyAngularVelocity = Vector3.zero
+        end)
+
+        return true
+    end
+
+    function RuntimeFix.floodLever(map)
+        -- สแกนครั้งแรกเมื่อ Map เปลี่ยน แล้วติดตามของที่เพิ่มใหม่
+        if RuntimeFix.FloodMap ~= map then
+            if RuntimeFix.FloodMapConnection then
+                RuntimeFix.FloodMapConnection:Disconnect()
+                RuntimeFix.FloodMapConnection = nil
+            end
+
+            RuntimeFix.FloodMap = map
+            RuntimeFix.FloodPrompts = {}
+
+            if map then
+                local function add(object)
+                    if object:IsA("ProximityPrompt")
+                        and object.Name == "FloodLeverPrompt" then
+
+                        RuntimeFix.FloodPrompts[object] = true
+                    end
+                end
+
+                for _, object in ipairs(map:GetDescendants()) do
+                    add(object)
+                end
+
+                RuntimeFix.FloodMapConnection =
+                    map.DescendantAdded:Connect(add)
+            end
+        end
+
+        for prompt in pairs(RuntimeFix.FloodPrompts or {}) do
+            if not prompt:IsDescendantOf(map) then
+                RuntimeFix.FloodPrompts[prompt] = nil
+            elseif prompt.Enabled then
+                return prompt
+            end
+        end
+
+        return nil
+    end
+
+    table.insert(AutoFarmSession.Cleanups, function()
+        if RuntimeFix.FloodMapConnection then
+            RuntimeFix.FloodMapConnection:Disconnect()
+            RuntimeFix.FloodMapConnection = nil
+        end
+
+        RuntimeFix.floodStatus("หยุด Auto Farm")
+    end)
+
+    function RuntimeFix.floodStep()
+        local root = getCharacterRoot()
+        local humanoid = getHumanoid()
+
+        if not root or not humanoid or humanoid.Health <= 0 then
+            stopHover()
+            return
+        end
+
+        local floor = workspace:GetAttribute("FloodFloor")
+        local water = workspace:GetAttribute("FloodLevel")
+        local phase = workspace:GetAttribute("FloodPhase")
+        local roof = workspace:GetAttribute("FloodRoof") == true
+
+        if type(floor) ~= "number"
+            or type(water) ~= "number"
+            or (
+                phase ~= "fight"
+                and phase ~= "block"
+                and phase ~= "drain"
+            ) then
+
+            stopHover()
+            RuntimeFix.floodStatus("รอ Flood State จาก Server")
+            return
+        end
+
+        local key = RuntimeFix.floodKey()
+
+        if RuntimeFix.FloodState ~= key then
+            RuntimeFix.FloodCombatGate = nil
+            stopHover()
+            IsHealing = false
+            SkillAimState = nil
+            RuntimeFix.FloodState = key
+        end
+
+        local world = workspace:FindFirstChild("World")
+        local markers = world and world:FindFirstChild("Markers")
+
+        local marker = markers and markers:FindFirstChild(
+            roof and "Roof"
+                or (floor == 0 and "Parking" or "Floor" .. floor)
+        )
+
+        local origin = RuntimeFix.floodPoint(
+            marker and marker:FindFirstChild("Respawn")
+        ) or RuntimeFix.floodPoint(marker)
+
+        if roof and not origin then
+            origin = RuntimeFix.floodPoint(
+                markers and markers:FindFirstChild("BossSpawn")
+            )
+        end
+
+        if floor > 0 and not origin then
+            stopHover()
+            RuntimeFix.floodStatus("รอ Marker ของชั้นปัจจุบัน")
+            return
+        end
+
+        -- พิกัดที่ผู้ใช้ยืนยันสำหรับชั้น 10
+        local floor10ClearPoint = floor == 10 and not roof
+            and Vector3.new(-191, 549, -19) or nil
+
+        local function inFloor10Zone(part)
+            return floor10ClearPoint ~= nil
+                and part ~= nil
+                and math.abs(
+                    part.Position.Y - floor10ClearPoint.Y
+                ) < 30
+        end
+
+        -- ย้ายตามชั้นที่ Server เปิดแล้วเท่านั้น
+        local floorToken = tostring(floor) .. ":" .. tostring(roof)
+
+        if RuntimeFix.FloodFloorToken ~= floorToken then
+            local entryPoint = floor10ClearPoint
+                or (origin and origin + Vector3.new(0, 3, 0))
+
+            if entryPoint
+                and not RuntimeFix.floodHold(entryPoint) then
+                return
+            end
+
+            RuntimeFix.FloodFloorToken = floorToken
+        end
+
+        local label = roof and "Roof" or ("Floor " .. floor)
+
+        local contested =
+            workspace:GetAttribute("FloodGateContested") == true
+
+        -- ตรวจมอนในชั้นปัจจุบันก่อนเข้า Hold Gate
+        local enemies = workspace:FindFirstChild("enemies")
+
+        if not enemies then
+            stopHover()
+            RuntimeFix.floodStatus(label .. " | รอ enemies")
+            return
+        end
+
+        local best, distance
+        local priorityEnemy, priorityDistance
+
+        local gateObjects = world
+            and world:FindFirstChild("MapObjects")
+
+        local activeGate = gateObjects
+            and gateObjects:FindFirstChild("FloodGateZone")
+
+        local gateStage = phase == "block"
+            and not roof
+            and workspace:GetAttribute("FloodLeverAt") == nil
+            and activeGate ~= nil
+            and activeGate:IsA("BasePart")
+
+        local gateBoss, gateBossDistance
+        local gateEnemy, gateEnemyDistance
+
+        for _, enemy in ipairs(enemies:GetChildren()) do
+            local part = getEnemyRoot(enemy)
+
+            if part
+                and isEnemyAlive(enemy)
+                and part.Position.Y > water
+                and (
+                    not origin
+                    or floor == 0
+                    or math.abs(part.Position.Y - origin.Y) < 30
+                    or inFloor10Zone(part)
+                ) then
+
+                local d = (part.Position - root.Position).Magnitude
+
+                if gateStage then
+                    -- ฟังก์ชันเดิมอ่าน enemyStore และ enemiesByName
+                    local _, boss = readFateEnemy(enemy)
+
+                    if boss == true then
+                        if not gateBoss
+                            or enemy == CurrentTarget
+                            or (
+                                gateBoss ~= CurrentTarget
+                                and d < gateBossDistance
+                            ) then
+
+                            gateBoss = enemy
+                            gateBossDistance = d
+                        end
+
+                    elseif boss == false
+                        and (
+                            part.Position - activeGate.Position
+                        ).Magnitude <= 18 then
+
+                        if not gateEnemy
+                            or enemy == CurrentTarget
+                            or (
+                                gateEnemy ~= CurrentTarget
+                                and d < gateEnemyDistance
+                            ) then
+
+                            gateEnemy = enemy
+                            gateEnemyDistance = d
+                        end
+                    end
+                end
+
+                if not distance or d < distance then
+                    best = enemy
+                    distance = d
+                end
+
+                -- เคลียร์มอนระดับล่างก่อน เริ่มจากตัวใกล้พิกัด
+                if inFloor10Zone(part) then
+                    local clearDistance = (
+                        part.Position - floor10ClearPoint
+                    ).Magnitude
+
+                    if not priorityDistance
+                        or clearDistance < priorityDistance then
+
+                        priorityEnemy = enemy
+                        priorityDistance = clearDistance
+                    end
+                end
+            end
+        end
+
+        -- มอนทั่วไปลอยตีภายใน Gate; บอสออกไปไล่ได้
+        if gateStage then
+            if RuntimeFix.floodKey() ~= key then return end
+
+            if gateBoss then
+                RuntimeFix.FloodCombatGate = nil
+
+                if CurrentTarget ~= gateBoss
+                    or RuntimeFix.FloodHolding
+                    or not HoverConnection then
+
+                    if not startHover(gateBoss) then return end
+                end
+
+                if CurrentTarget == gateBoss
+                    and isEnemyAlive(gateBoss) then
+
+                    if not handleRetreatHeal() then
+                        attackEnemy()
+                        useReadySkills()
+                    end
+                end
+
+                return
+            end
+
+            local waitPosition = RuntimeFix.floodGatePosition(
+                RuntimeFix.floodSafe(root.Position),
+                activeGate
+            )
+
+            if not waitPosition then
+                RuntimeFix.FloodCombatGate = nil
+
+                RuntimeFix.floodStatus(
+                    label .. " | Gate ต่ำกว่าระยะปลอดภัยเหนือน้ำ"
+                )
+
+                RuntimeFix.floodHold(root.Position)
+                return
+            end
+
+            local targetRoot = gateEnemy
+                and getEnemyRoot(gateEnemy)
+
+            local currentWater =
+                workspace:GetAttribute("FloodLevel")
+
+            IsHealing = false
+
+            if gateEnemy
+                and gateEnemy.Parent == enemies
+                and targetRoot
+                and isEnemyAlive(gateEnemy)
+                and type(currentWater) == "number"
+                and targetRoot.Position.Y > currentWater
+                and (
+                    targetRoot.Position - activeGate.Position
+                ).Magnitude <= 18 then
+
+                RuntimeFix.FloodCombatGate = activeGate
+
+                if CurrentTarget ~= gateEnemy
+                    or RuntimeFix.FloodHolding
+                    or not HoverConnection then
+
+                    if not startHover(gateEnemy) then return end
+                end
+
+                if RuntimeFix.floodKey() ~= key then return end
+
+                if CurrentTarget == gateEnemy
+                    and isEnemyAlive(gateEnemy) then
+
+                    RuntimeFix.floodStatus(
+                        label .. " | ลอยตีมอนภายใน Gate"
+                    )
+
+                    attackEnemy()
+                    useReadySkills()
+                end
+            else
+                RuntimeFix.FloodCombatGate = nil
+
+                RuntimeFix.floodStatus(
+                    label .. " | Hold Gate: รอมอนเข้ามา"
+                )
+
+                RuntimeFix.floodHold(waitPosition)
+            end
+
+            return
+        end
+
+        -- ชั้น 10: ยืนจุดเดิมตลอดช่วงเคลียร์มอน
+        if floor10ClearPoint
+            and (
+                phase == "fight"
+                or (
+                    phase == "block"
+                    and (best ~= nil or contested)
+                )
+            ) then
+
+            IsHealing = false
+
+            if not RuntimeFix.floodHold(floor10ClearPoint) then
+                return
+            end
+
+            if AutoFarmSession.Cancelled
+                or not AutoFarmEnabled
+                or RuntimeFix.floodKey() ~= key then
+                return
+            end
+
+            local targetRoot = CurrentTarget
+                and getEnemyRoot(CurrentTarget)
+
+            local keepTarget = CurrentTarget ~= nil
+                and CurrentTarget.Parent == enemies
+                and isEnemyAlive(CurrentTarget)
+                and targetRoot ~= nil
+                and targetRoot.Position.Y > water
+                and (
+                    inFloor10Zone(targetRoot)
+                    or (
+                        origin
+                        and math.abs(
+                            targetRoot.Position.Y - origin.Y
+                        ) < 30
+                    )
+                )
+
+            if not keepTarget
+                or (
+                    priorityEnemy
+                    and not inFloor10Zone(targetRoot)
+                ) then
+
+                CurrentTarget = priorityEnemy or best
+            end
+
+            if CurrentTarget then
+                RuntimeFix.floodStatus(
+                    label .. " | ยืนเคลียร์มอนที่ -191, 549, -19"
+                )
+
+                attackEnemy()
+                useReadySkills()
+            else
+                RuntimeFix.floodStatus(
+                    label .. " | ยืนรอมอน / รอ Server เปลี่ยน Phase"
+                )
+            end
+
+            return
+        end
+
+        if phase == "fight"
+            or (
+                phase == "block"
+                and (best ~= nil or contested)
+            )
+            or roof then
+
+            -- เก็บเป้าหมายเดิมไว้ หากยังอยู่ในช่วงความสูงที่ถูกต้อง
+            if CurrentTarget then
+                local part = getEnemyRoot(CurrentTarget)
+
+                if not part
+                    or not isEnemyAlive(CurrentTarget)
+                    or part.Position.Y <= water
+                    or (
+                        origin
+                        and floor ~= 0
+                        and math.abs(part.Position.Y - origin.Y) >= 30
+                        and not inFloor10Zone(part)
+                    ) then
+
+                    stopHover()
+                end
+            end
+
+            -- เปลี่ยนจากมอนระดับบนไปเคลียร์ระดับล่างก่อน
+            if priorityEnemy
+                and CurrentTarget
+                and not inFloor10Zone(
+                    getEnemyRoot(CurrentTarget)
+                ) then
+
+                stopHover()
+            end
+
+            if not CurrentTarget and (priorityEnemy or best) then
+                startHover(priorityEnemy or best)
+            end
+
+            if CurrentTarget then
+                RuntimeFix.floodStatus(
+                    label .. (
+                        priorityEnemy
+                            and " | เคลียร์มอนบริเวณ -191, 549, -19"
+                            or (
+                                phase == "block"
+                                    and " | เคลียร์มอนก่อน Hold Gate"
+                                    or " | ต่อสู้"
+                            )
+                    )
+                )
+
+                if not handleRetreatHeal() then
+                    attackEnemy()
+                    useReadySkills()
+                end
+            else
+                RuntimeFix.floodStatus(
+                    label .. " | รอศัตรู / รอ Server"
+                )
+
+                RuntimeFix.floodHold(
+                    origin and origin + Vector3.new(0, 3, 0)
+                        or root.Position
+                )
+            end
+
+            return
+        end
+
+        if phase == "drain" then
+            RuntimeFix.floodStatus(
+                label .. " | Drain: รอ Server เปิดชั้นถัดไป"
+            )
+
+            RuntimeFix.floodHold(root.Position)
+            return
+        end
+
+        if workspace:GetAttribute("FloodLeverAt") ~= nil then
+            local map = world and world:FindFirstChild("Map")
+            local prompt = RuntimeFix.floodLever(map)
+
+            local position = prompt
+                and RuntimeFix.floodPoint(prompt.Parent)
+
+            if not position then
+                RuntimeFix.floodStatus(
+                    label .. " | รอ Lever ที่ Enabled"
+                )
+
+                RuntimeFix.floodHold(root.Position)
+                return
+            end
+
+            local destination = RuntimeFix.floodSafe(
+                position + Vector3.new(0, 2, 0)
+            )
+
+            if (destination - position).Magnitude
+                >= prompt.MaxActivationDistance then
+
+                RuntimeFix.floodStatus(
+                    label .. " | Lever อยู่ต่ำกว่าระยะปลอดภัยเหนือน้ำ"
+                )
+
+                RuntimeFix.floodHold(root.Position)
+                return
+            end
+
+            RuntimeFix.floodStatus(label .. " | ดึง Lever")
+
+            if not RuntimeFix.floodHold(destination) then
+                return
+            end
+
+            if not prompt.Enabled
+                or RuntimeFix.floodKey() ~= key
+                or workspace:GetAttribute("FloodLeverAt") == nil
+                or (root.Position - position).Magnitude
+                    > prompt.MaxActivationDistance then
+                return
+            end
+
+            if os.clock()
+                < (RuntimeFix.FloodLeverRetryAt or 0) then
+                return
+            end
+
+            RuntimeFix.FloodLeverRetryAt =
+                os.clock() + prompt.HoldDuration + 2
+
+            RuntimeFix.FloodPrompt = prompt
+
+            local usedNativeHold = false
+
+            local ok, err = pcall(function()
+                if not prompt.Parent
+                    or not prompt.Enabled
+                    or AutoFarmSession.Cancelled
+                    or not AutoFarmEnabled
+                    or RuntimeFix.floodKey() ~= key
+                    or workspace:GetAttribute("FloodLeverAt") == nil
+                    or (root.Position - position).Magnitude
+                        > prompt.MaxActivationDistance then
+                    return
+                end
+
+                -- เรียก Lever โดยตรง ไม่ต้องเล็งกล้องหรือกด E
+                if type(fireproximityprompt) == "function" then
+                    fireproximityprompt(prompt)
+                    return
+                end
+
+                -- วิธีเดิม เมื่อ Executor ไม่มี API โดยตรง
+                usedNativeHold = true
+                prompt:InputHoldBegin()
+
+                local deadline =
+                    os.clock() + prompt.HoldDuration + 0.1
+
+                while os.clock() < deadline
+                    and prompt.Parent
+                    and prompt.Enabled
+                    and AutoFarmEnabled
+                    and not AutoFarmSession.Cancelled
+                    and RuntimeFix.floodKey() == key
+                    and workspace:GetAttribute("FloodLeverAt") ~= nil
+                    and (root.Position - position).Magnitude
+                        <= prompt.MaxActivationDistance do
+
+                    task.wait(0.05)
+                end
+            end)
+
+            if usedNativeHold then
+                pcall(function()
+                    prompt:InputHoldEnd()
+                end)
+            end
+
+            RuntimeFix.FloodPrompt = nil
+
+            if not ok then
+                RuntimeFix.floodStatus(
+                    "Lever input failed: " .. tostring(err)
+                )
+            end
+
+            -- รอ Server ลบ FloodLeverAt เพื่อยืนยันผลจริง
+            return
+        end
+
+        local objects = world
+            and world:FindFirstChild("MapObjects")
+
+        local gate = objects
+            and objects:FindFirstChild("FloodGateZone")
+
+        if not gate or not gate:IsA("BasePart") then
+            RuntimeFix.floodStatus(label .. " | รอ GateZone")
+            RuntimeFix.floodHold(root.Position)
+            return
+        end
+
+        local destination = RuntimeFix.floodSafe(gate.Position)
+
+        -- GateRadius = 18 ตามรายงาน เว้นขอบไว้ 1 stud
+        if (destination - gate.Position).Magnitude > 17 then
+            RuntimeFix.floodStatus(
+                label .. " | Gate อยู่ต่ำกว่าระยะปลอดภัยเหนือน้ำ"
+            )
+
+            RuntimeFix.floodHold(root.Position)
+            return
+        end
+
+        local progress = tonumber(
+            workspace:GetAttribute("FloodGate")
+        ) or 0
+
+        RuntimeFix.floodStatus(
+            ("%s | Hold Gate %.0f%% | Crowd %s"):format(
+                label,
+                math.clamp(progress, 0, 1) * 100,
+                tostring(workspace:GetAttribute("FloodGateCrowd"))
+            )
+        )
+
+        RuntimeFix.floodHold(destination)
+    end
+
     local function StartAutoFarm()
         if AutoFarmEnabled then
             return
@@ -6467,6 +8503,31 @@ do
                 return
             end
             local char = getCharacter()
+
+            -- ตรวจน้ำระหว่างเดินทางด้วย ไม่ใช่เฉพาะปลายทาง
+            if RuntimeFix.isFlood()
+                and not RuntimeFix.EndRoundPaused
+                and PlayerGui:GetAttribute("EndScreenActive") ~= true then
+
+                local root = getCharacterRoot()
+                local humanoid = getHumanoid()
+
+                if root and humanoid and humanoid.Health > 0 then
+                    local safe = RuntimeFix.floodSafe(root.Position)
+
+                    if safe.Y > root.Position.Y then
+                        if RuntimeFix.RootTweenCleanup then
+                            RuntimeFix.RootTweenCleanup()
+                        end
+
+                        root.CFrame =
+                            CFrame.new(safe) * root.CFrame.Rotation
+
+                        root.AssemblyLinearVelocity = Vector3.zero
+                    end
+                end
+            end
+
             RememberCharacter(char)
             if char then
                 local waiting = RuntimeFix.WaitingStand
@@ -6504,6 +8565,7 @@ do
 
                     stopHover()
                     resetRubbleState()
+                    RuntimeFix.FateArenaCharacter = nil
 
                     IsHealing = false
                     SkillAimState = nil
@@ -6511,6 +8573,12 @@ do
                     LastTeleportedArea = nil
 
                     task.wait(0.2)
+                    continue
+                end
+
+                if RuntimeFix.isFlood() then
+                    RuntimeFix.floodStep()
+                    task.wait(0.15)
                     continue
                 end
 
@@ -6674,16 +8742,34 @@ do
                     local needSwitchFromBoss = false
 
                     if CurrentTarget and isEnemyAlive(CurrentTarget) then
-                        if isShadowGateRaid() then
+                        if isFateRaid() then
+                            local key, boss = readFateEnemy(CurrentTarget)
+
+                            if not key then
+                                needSwitchFromBoss = true
+
+                            elseif boss then
+                                needSwitchFromBoss =
+                                    isRaidBossGuarded()
+                                    or hasMinionsAliveInArea(CurrentAreaName)
+
+                            elseif isRaidBossGuarded()
+                                and key ~= "fateOath" then
+
+                                local priority =
+                                    getNearestEnemyInArea(CurrentAreaName)
+
+                                needSwitchFromBoss = priority ~= nil
+                                    and readFateEnemy(priority) == "fateOath"
+                            end
+
+                        elseif isShadowGateRaid() then
                             if isShadowGateMainBoss(CurrentTarget) then
                                 needSwitchFromBoss =
-                                    workspace:GetAttribute("RaidBossGuarded") == true
-                                    or (
-                                        tonumber(workspace:GetAttribute("RaidOathCount"))
-                                        or 0
-                                    ) > 0
+                                    isRaidBossGuarded()
                                     or hasMinionsAliveInArea(CurrentAreaName)
                             end
+
                         elseif isEnemyBoss(CurrentTarget) then
                             needSwitchFromBoss =
                                 hasMinionsAliveInArea(CurrentAreaName)
@@ -6707,14 +8793,14 @@ do
 
                             -- startHover เรียก stopHover เพื่อปลดจุดรอก่อน Orbit
                             if not startHover(enemy) then
-                                if isShadowGateRaid() then
+                                if isShadowGateRaid() or isFateRaid() then
                                     stopHover()
                                 else
                                     holdStillWhileWaiting(CurrentAreaName)
                                 end
                             end
                         else
-                            if isShadowGateRaid() then
+                            if isShadowGateRaid() or isFateRaid() then
                                 stopHover()
                             else
                                 holdStillWhileWaiting(CurrentAreaName)
@@ -10102,6 +12188,7 @@ do
     })
 
     local itemUI, craftUI, farmUI
+    local accessoryIcons = {}
 
     local function save()
         if not ready or restoring then return end
@@ -10110,6 +12197,8 @@ do
         state.farm = farmUI.Value
         state.target = itemUI.Value
         state.money = nil
+        state.icons = next(accessoryIcons)
+            and accessoryIcons or state.icons
 
         local encoded = Http:JSONEncode(state)
 
@@ -10127,6 +12216,75 @@ do
         Description = "เลือกสูตร; ระบบหยุดเมื่อมี Accessory เป้าหมายแล้ว",
         Callback = save,
     })
+
+    -- รูปเล็กข้างชื่อ เฉพาะ Dropdown Accessory
+    do
+        local originalOpenMenu = Window._OpenMenu
+
+        assert(
+            type(originalOpenMenu) == "function",
+            "MacUI dropdown menu API unavailable"
+        )
+
+        local function OpenMenuWithAccessoryIcons(self, anchor, info)
+            local isAccessory = info.Values == itemUI.Values
+
+            if isAccessory then
+                info = table.clone(info)
+                info.MinWidth = math.max(info.MinWidth or 0, 260)
+            end
+
+            local popup = originalOpenMenu(self, anchor, info)
+
+            if not isAccessory or not popup or not popup.Canvas then
+                return popup
+            end
+
+            local icons = next(accessoryIcons)
+                and accessoryIcons or state.icons
+
+            if type(icons) ~= "table" then
+                return popup
+            end
+
+            -- ตรวจรายการครั้งเดียวเมื่อเปิดเมนู ไม่มี Loop สแกนต่อเนื่อง
+            for _, row in ipairs(popup.Canvas:GetDescendants()) do
+                if row:IsA("TextButton") and row.Name == "Item" then
+                    local value = info.Values[row.LayoutOrder]
+                    local image = value and icons[value]
+                    local label = row:FindFirstChildWhichIsA("TextLabel")
+
+                    if type(image) == "string" and label then
+                        local icon = Instance.new("ImageLabel")
+                        icon.Name = "AccessoryIcon"
+                        icon.BackgroundTransparency = 1
+                        icon.AnchorPoint = Vector2.new(0, 0.5)
+                        icon.Position = UDim2.new(0, 26, 0.5, 0)
+                        icon.Size = UDim2.fromOffset(20, 20)
+                        icon.ScaleType = Enum.ScaleType.Fit
+                        icon.ImageColor3 = Color3.new(1, 1, 1)
+                        icon.Image = image
+                        icon.ZIndex = label.ZIndex
+                        icon.Parent = row
+
+                        -- เว้นที่สำหรับเครื่องหมายเลือกและรูปไอเทม
+                        label.Position = UDim2.fromOffset(52, 0)
+                        label.Size = UDim2.new(1, -58, 1, 0)
+                    end
+                end
+            end
+
+            return popup
+        end
+
+        Window._OpenMenu = OpenMenuWithAccessoryIcons
+
+        MacUI:OnUnload(function()
+            if Window._OpenMenu == OpenMenuWithAccessoryIcons then
+                Window._OpenMenu = originalOpenMenu
+            end
+        end)
+    end
 
     craftUI = section:AddToggle("ZeroXAutoCraftAccessory", {
         Title = "Auto Craft",
@@ -10285,6 +12443,8 @@ do
         )
 
         local lookup, values = {}, {}
+        table.clear(accessoryIcons)
+        state.icons = accessoryIcons
 
         for rawKey, recipe in pairs(recipes) do
             if type(recipe) == "table"
@@ -10326,6 +12486,13 @@ do
 
                 local label = item.Name .. " [" .. key .. "]"
                 assert(not lookup[label], "Duplicate recipe label")
+
+                local iconRaw = item.Icon
+
+                state.icons[label] = type(iconRaw) == "string"
+                    and iconRaw:match("^%d+$")
+                    and ("rbxassetid://" .. iconRaw)
+                    or "rbxassetid://119682824932913"
 
                 lookup[label] = {
                     key = key,
@@ -11775,6 +13942,463 @@ do
 
         if ZeroXContext.LobbyOwner == "Evolve" then
             ZeroXContext.LobbyOwner = nil
+        end
+    end)
+end
+
+--------------------------------------------------------------------------------
+-- IN-GAME: Auto Mirror Blessing
+--------------------------------------------------------------------------------
+do
+    local RS = game:GetService("ReplicatedStorage")
+    local alive = true
+    local ready = false
+    local packet
+    local retryAt = 0
+    local lastSentEnds
+    local pending
+    local lastError
+    local lastText
+    local connections = {}
+
+    local function isBlessingMode()
+        local mode = workspace:GetAttribute("Mode")
+
+        return ZeroXContext.IsMatch()
+            and (
+                mode == "fateraid"
+                or mode == "floodescape"
+            )
+    end
+
+    -- ข้อมูลสำรองจากรายงาน สำหรับแสดงตัวเลือกก่อนโหลด Config จริง
+    local definitions = {
+        Sharp = {
+            Name = "Sharper Edge", Rarity = "Common",
+        },
+        BigHeart = {
+            Name = "Big Heart", Rarity = "Common",
+        },
+        Swift = {
+            Name = "Swift Steps", Rarity = "Common",
+        },
+        ShardSnack = {
+            Name = "Shard Snack", Rarity = "Rare",
+        },
+        ChainShatter = {
+            Name = "Chain Shatter", Rarity = "Rare",
+        },
+        MirrorArmor = {
+            Name = "Mirror Armor", Rarity = "Epic",
+        },
+        SpareHeart = {
+            Name = "Spare Heart", Rarity = "Epic",
+        },
+    }
+
+    local rarityRank = {
+        Common = 1,
+        Rare = 2,
+        Epic = 3,
+    }
+
+    local labels = {}
+    local labelToId = {}
+
+    local section = Tabs.Card:AddSection({
+        Title = "Mirror Blessing",
+        Icon = "diamond",
+        Description = "เลือก Blessing ตาม Priority 1 → 3; ",
+    })
+
+    local toggle = section:AddToggle("ZeroXAutoMirrorBlessing", {
+        Title = "Auto Mirror Blessing",
+        Description = "เลือกจากการ์ดออโต้",
+        Default = false,
+    })
+
+    local priority = {}
+
+    local function rebuildChoices()
+        labels = { "None" }
+        labelToId = {}
+
+        for id, def in pairs(definitions) do
+            local label = def.Name .. " [" .. id .. "]"
+            table.insert(labels, label)
+            labelToId[label] = id
+        end
+
+        table.sort(labels, function(a, b)
+            if a == "None" then return b ~= "None" end
+            if b == "None" then return false end
+            return a < b
+        end)
+
+        for _, control in ipairs(priority) do
+            local previous = control.Value
+            control:SetValues(labels)
+            control:SetValue(
+                labelToId[previous] and previous or "None"
+            )
+        end
+    end
+
+    rebuildChoices()
+
+    for index = 1, 3 do
+        priority[index] = section:AddDropdown(
+            "ZeroXMirrorPriority" .. index,
+            {
+                Title = "Priority " .. index,
+                Values = labels,
+                Default = "None",
+                Searchable = true,
+            }
+        )
+    end
+
+    local fallback = section:AddDropdown("ZeroXMirrorFallback", {
+        Title = "Fallback",
+        Description = "ใช้เมื่อการ์ด Priority ไม่อยู่ในข้อเสนอ",
+        Values = {
+            "Highest Rarity",
+            "First Offered",
+        },
+        Default = "Highest Rarity",
+    })
+
+    local status = section:AddParagraph({
+        Title = "Status",
+        Content = "ปิด Auto Mirror Blessing",
+    })
+
+    local function show(text)
+        if text ~= lastText then
+            lastText = text
+            status:SetContent(text)
+        end
+    end
+
+    local function find(path)
+        local object = RS
+
+        for _, name in ipairs(path) do
+            object = object:FindFirstChild(name)
+            if not object then return nil end
+        end
+
+        return object
+    end
+
+    local function setup()
+        if ready then return true end
+        if os.clock() < retryAt then return false end
+
+        retryAt = os.clock() + 1
+
+        local configModule = find({
+            "assets", "config", "FateBlessings",
+        })
+
+        local remote = RS:FindFirstChild("FateBlessingPick")
+
+        if not configModule or not remote then
+            return false
+        end
+
+        assert(
+            configModule:IsA("ModuleScript"),
+            "FateBlessings is not ModuleScript"
+        )
+
+        assert(
+            remote:IsA("RemoteEvent"),
+            "FateBlessingPick is not RemoteEvent"
+        )
+
+        local config = require(configModule)
+
+        assert(
+            type(config) == "table"
+                and type(config.List) == "table",
+            "FateBlessings.List unavailable"
+        )
+
+        local actual = {}
+
+        for key, def in pairs(config.List) do
+            assert(
+                type(def) == "table",
+                "Unsupported FateBlessings.List entry"
+            )
+
+            local id = type(def.Id) == "string" and def.Id
+                or type(key) == "string" and key
+
+            assert(id and id ~= "", "Blessing ID unavailable")
+
+            local previous = definitions[id]
+
+            local name = type(def.Name) == "string" and def.Name
+                or previous and previous.Name or id
+
+            local rarity = type(def.Rarity) == "string" and def.Rarity
+                or previous and previous.Rarity
+
+            assert(
+                not actual[id],
+                "Duplicate Blessing ID: " .. id
+            )
+
+            actual[id] = {
+                Name = name,
+                Rarity = rarity,
+            }
+        end
+
+        assert(next(actual), "Empty FateBlessings.List")
+
+        definitions = actual
+        packet = remote
+
+        rebuildChoices()
+        ready = true
+
+        return true
+    end
+
+    local function parse(raw)
+        local result = {}
+        local seen = {}
+
+        if type(raw) ~= "string" then
+            return result
+        end
+
+        for part in raw:gmatch("[^,]+") do
+            local id = part:match("^%s*(.-)%s*$")
+
+            if id ~= "" and not seen[id] then
+                seen[id] = true
+                table.insert(result, id)
+            end
+        end
+
+        return result
+    end
+
+    local function countHistory(id)
+        local raw = LocalPlayer:GetAttribute("FateBlessings")
+
+        if raw == nil then return 0 end
+
+        assert(
+            type(raw) == "string",
+            "Invalid FateBlessings attribute"
+        )
+
+        local count = 0
+
+        for part in raw:gmatch("[^,]+") do
+            if part:match("^%s*(.-)%s*$") == id then
+                count += 1
+            end
+        end
+
+        return count
+    end
+
+    local function cardName(id)
+        return definitions[id] and definitions[id].Name or id
+    end
+
+    local function choose(offered)
+        for _, control in ipairs(priority) do
+            local id = labelToId[control.Value]
+
+            if id and table.find(offered, id) then
+                return id
+            end
+        end
+
+        local best = offered[1]
+
+        if fallback.Value == "Highest Rarity" then
+            for _, id in ipairs(offered) do
+                local rank =
+                    rarityRank[(definitions[id] or {}).Rarity] or 0
+
+                local bestRank =
+                    rarityRank[(definitions[best] or {}).Rarity] or 0
+
+                if rank > bestRank then
+                    best = id
+                end
+            end
+        end
+
+        return best
+    end
+
+    local function tick()
+        if pending then
+            if countHistory(pending.id) > pending.before then
+                show("ยืนยันได้รับ: " .. cardName(pending.id))
+                pending = nil
+
+            elseif workspace:GetServerTimeNow()
+                > pending.endsAt + 5 then
+
+                show("ไม่พบการยืนยันรับ Blessing — ไม่ส่งซ้ำรอบเดิม")
+                pending = nil
+            end
+        end
+
+        if not toggle.Value then
+            show(lastError or "ปิด Auto Mirror Blessing")
+            return
+        end
+
+        if not isBlessingMode() then
+            show("รอเข้า Evil Reflection / Tidal High Rise")
+            return
+        end
+
+        if not setup() then
+            show("รอ Config / FateBlessingPick")
+            return
+        end
+
+        if pending then return end
+
+        local raw = LocalPlayer:GetAttribute("FateOffer")
+        local endsAt = LocalPlayer:GetAttribute("FateOfferEnds")
+
+        if type(raw) ~= "string" or raw == "" then
+            if not lastText
+                or not lastText:find("ยืนยันได้รับ:", 1, true) then
+
+                show("รอ Mirror Blessing รอบถัดไป")
+            end
+
+            return
+        end
+
+        if type(endsAt) ~= "number" or endsAt ~= endsAt then
+            show("รอ FateOfferEnds")
+            return
+        end
+
+        if workspace:GetServerTimeNow() >= endsAt then
+            show("ข้อเสนอหมดเวลา")
+            return
+        end
+
+        if lastSentEnds == endsAt then
+            return
+        end
+
+        local offered = parse(raw)
+        local id = choose(offered)
+
+        if not id then
+            show("ไม่พบตัวเลือกใน FateOffer")
+            return
+        end
+
+        assert(
+            definitions[id],
+            "Unknown offered Blessing: " .. id
+        )
+
+        -- ตรวจข้อเสนออีกครั้งก่อนส่ง
+        if not alive or not toggle.Value
+            or not isBlessingMode()
+            or LocalPlayer:GetAttribute("FateOffer") ~= raw
+            or LocalPlayer:GetAttribute("FateOfferEnds") ~= endsAt
+            or workspace:GetServerTimeNow() >= endsAt then
+
+            return
+        end
+
+        local before = countHistory(id)
+
+        -- ล็อกก่อน FireServer เพื่อไม่ส่งซ้ำกรณีผลไม่แน่นอน
+        lastSentEnds = endsAt
+
+        pending = {
+            id = id,
+            endsAt = endsAt,
+            before = before,
+        }
+
+        show("ส่งเลือก: " .. cardName(id) .. " — รอยืนยัน")
+        packet:FireServer(id)
+    end
+
+    -- Event เป็นหลัก พร้อมตรวจสำรองสำหรับการโหลดและ Timeout
+    local dirty = true
+
+    local function changed()
+        dirty = true
+    end
+
+    for _, name in ipairs({
+        "FateOffer",
+        "FateOfferEnds",
+        "FateBlessings",
+    }) do
+        table.insert(
+            connections,
+            LocalPlayer:GetAttributeChangedSignal(name):Connect(changed)
+        )
+    end
+
+    table.insert(
+        connections,
+        workspace:GetAttributeChangedSignal("Mode"):Connect(changed)
+    )
+
+    toggle:OnChanged(function()
+        lastError = nil
+        changed()
+    end)
+
+    for _, control in ipairs(priority) do
+        control:OnChanged(changed)
+    end
+
+    fallback:OnChanged(changed)
+
+    MacUI:OnUnload(function()
+        alive = false
+
+        for _, connection in ipairs(connections) do
+            connection:Disconnect()
+        end
+
+        table.clear(connections)
+    end)
+
+    task.spawn(function()
+        local nextCheck = 0
+
+        while alive do
+            if dirty or os.clock() >= nextCheck then
+                dirty = false
+                nextCheck = os.clock() + 1
+
+                local ok, err = pcall(tick)
+
+                if not ok then
+                    toggle:SetValue(false)
+                    lastError = tostring(err)
+                    show("Mirror Blessing: " .. lastError)
+                end
+            end
+
+            task.wait(0.15)
         end
     end)
 end
