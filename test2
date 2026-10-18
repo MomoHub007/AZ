@@ -9520,8 +9520,26 @@ RuntimeFix.FarmOptions = {
             and 1 or 0
     end
 
-    RuntimeFix.MonarchRecipes =
-        RuntimeFix.runtimeMonarchRecipes()
+    do
+        local loaded, recipes = xpcall(
+            RuntimeFix.runtimeMonarchRecipes,
+            function(failure)
+                return debug.traceback(tostring(failure), 2)
+            end
+        )
+
+        -- จบสคริปต์รอบเก่าหากถูก Session ใหม่ยกเลิก
+        if AutoFarmSession.Cancelled then
+            return
+        end
+
+        -- Error อื่นยังแสดงพร้อม Stack Trace
+        if not loaded then
+            error(recipes, 0)
+        end
+
+        RuntimeFix.MonarchRecipes = recipes
+    end
 
     function RuntimeFix.monarchListen(packets)
         local state = RuntimeFix.Monarch
@@ -13017,7 +13035,7 @@ end)
     -- Unit Storage / Safe Slot Placement
     --==================================================
 
-    local function isUnitStorageOpen(): boolean
+    function RuntimeFix.isUnitStorageOpen(): boolean
         local playerGui = PlayerGui or (LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui"))
         if not playerGui then
             return false
