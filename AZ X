@@ -6006,6 +6006,63 @@ do
         )
     end
 
+    function RuntimeFix.requireNativeSkillModule(module)
+        assert(
+            typeof(module) == "Instance"
+                and module:IsA("ModuleScript"),
+            "Native skill loader expects a ModuleScript"
+        )
+
+        assert(type(getrenv) == "function", "getrenv unavailable")
+
+        local environment = getrenv()
+        local nativeRequire = environment and environment.require
+
+        assert(
+            type(nativeRequire) == "function",
+            "Native require unavailable"
+        )
+
+        assert(
+            type(getthreadidentity) == "function"
+                and type(setthreadidentity) == "function",
+            "Thread identity API unavailable"
+        )
+
+        local previousIdentity = getthreadidentity()
+
+        assert(
+            type(previousIdentity) == "number",
+            "Cannot read thread identity"
+        )
+
+        local ok, result = xpcall(function()
+            setthreadidentity(2)
+            return nativeRequire(module)
+        end, function(err)
+            return debug.traceback(tostring(err), 2)
+        end)
+
+        local restored, restoreError = pcall(
+            setthreadidentity,
+            previousIdentity
+        )
+
+        if not restored then
+            error(
+                "Native skill loader cannot restore identity: "
+                    .. tostring(restoreError),
+                0
+            )
+        end
+
+        if not ok then
+            error(result, 0)
+        end
+
+        return result
+    end
+
     local function isGameSkillBusy()
         local ok, busy = pcall(function()
             local scripts = LocalPlayer:FindFirstChild("PlayerScripts")
@@ -6017,7 +6074,8 @@ do
                 return false
             end
 
-            local playerStore = require(module)
+            local playerStore =
+                RuntimeFix.requireNativeSkillModule(module)
             local skill = playerStore.state.skill
 
             if not skill then
@@ -6046,6 +6104,99 @@ do
     local OriginalGetAimPoint = nil
     local AimPointReplacement = nil
     local NextSkillAPICheck = 0
+
+    function RuntimeFix.fixSkillRequire(controller)
+        assert(
+            type(getfenv) == "function"
+                and type(setfenv) == "function",
+            "Skill environment API unavailable"
+        )
+
+        local fn = controller.performSkill
+        assert(type(fn) == "function", "performSkill unavailable")
+
+        local previous = RuntimeFix.SkillRequirePatch
+
+        if previous
+            and previous.Function == fn
+            and getfenv(fn) == previous.Environment then
+            return
+        end
+
+        if previous then
+            previous.Restore()
+            RuntimeFix.SkillRequirePatch = nil
+        end
+
+        local global = ReplicatedStorage:FindFirstChild("global")
+        local module = global and global:FindFirstChild("Flags")
+
+        assert(
+            module and module:IsA("ModuleScript"),
+            "ReplicatedStorage.global.Flags unavailable"
+        )
+
+        local flags = RuntimeFix.requireNativeSkillModule(module)
+
+        assert(
+            type(flags) == "table"
+                and type(flags.IsOn) == "function"
+                and type(flags.Skill) == "function",
+            "Flags API unavailable"
+        )
+
+        local original = getfenv(fn)
+        local originalRequire = original.require
+
+        assert(
+            type(originalRequire) == "function",
+            "performSkill require unavailable"
+        )
+
+        -- สร้าง environment แยก ไม่เขียนทับตารางเดิมของเกม
+        local environment = {}
+
+        for key, value in pairs(original) do
+            environment[key] = value
+        end
+
+        setmetatable(environment, { __index = original })
+
+        environment.require = function(target, ...)
+            if target == "@game/ReplicatedStorage/global/Flags" then
+                return flags
+            end
+
+            return originalRequire(target, ...)
+        end
+
+        local function restore()
+            if getfenv(fn) == environment then
+                setfenv(fn, original)
+            end
+        end
+
+        setfenv(fn, environment)
+
+        RuntimeFix.SkillRequirePatch = {
+            Function = fn,
+            Environment = environment,
+            Restore = restore,
+        }
+
+        if not RuntimeFix.SkillRequireCleanupRegistered then
+            RuntimeFix.SkillRequireCleanupRegistered = true
+
+            table.insert(AutoFarmSession.Cleanups, function()
+                local record = RuntimeFix.SkillRequirePatch
+                RuntimeFix.SkillRequirePatch = nil
+
+                if record then
+                    record.Restore()
+                end
+            end)
+        end
+    end
 
     local function ensureMouseFreeSkillAPI()
         if DirectCharacterController
@@ -6105,8 +6256,11 @@ do
 
         local ok, characterController, inputController =
             pcall(function()
-                return require(characterModule),
-                    require(inputModule)
+                return RuntimeFix.requireNativeSkillModule(
+                    characterModule
+                ), RuntimeFix.requireNativeSkillModule(
+                    inputModule
+                )
             end)
 
         if not ok
@@ -6123,7 +6277,18 @@ do
             return nil
         end
 
-        if AutoFarmSession.Cancelled then return nil end
+        local requireReady, requireError = pcall(
+            RuntimeFix.fixSkillRequire,
+            characterController
+        )
+
+        if not requireReady then
+            RuntimeFix.skillIssue(
+                "Skill require setup failed",
+                requireError
+            )
+            return nil
+        end
 
         local originalAim = inputController.getAimPoint
 
@@ -6281,7 +6446,10 @@ do
             return false
         end
 
-        local ok, mouseAim = pcall(require, module)
+        local ok, mouseAim = pcall(
+            RuntimeFix.requireNativeSkillModule,
+            module
+        )
 
         if not ok
             or type(mouseAim) ~= "table"
@@ -6650,8 +6818,9 @@ do
         )
 
         assert(
-            type(controller.touchSkillUp) == "function",
-            "characterController.touchSkillUp unavailable"
+            type(controller.touchSkillDown) == "function"
+                and type(controller.touchSkillUp) == "function",
+            "Touch skill down/up API unavailable"
         )
 
         local character = getCharacter()
@@ -6699,40 +6868,48 @@ do
 
         local before = cooldown()
 
+        -- รอ Cooldown จริง ไม่ใช้เพียงเวลาหน่วงของ Auto Skill
+        if before > workspace:GetServerTimeNow() then
+            return false
+        end
+
+        -- ไม่แทรกระหว่างที่มีการเล็งอยู่แล้ว
         if aim.IsAiming() then
-            -- ไม่ปล่อยหรือยกเลิกการเล็งของสกิลช่องอื่น
-            if aim.AimingSlot() ~= slot then
-                RuntimeFix.skillIssue(
-                    "Touch aim belongs to another slot",
-                    "Requested=" .. slot
-                )
-                return false
-            end
-        else
-            local accepted = controller.performSkill(slot)
-
-            if not aim.IsAiming() then
-                return accepted == true
-            end
-
-            if aim.AimingSlot() ~= slot then
-                RuntimeFix.skillIssue(
-                    "Touch aim changed slot",
-                    "Requested=" .. slot
-                )
-                return false
-            end
+            return false
         end
 
         if AutoFarmSession.Cancelled
             or not AutoFarmEnabled
-            or getCharacter() ~= character
-        then
+            or getCharacter() ~= character then
             return false
         end
 
-        -- ใช้เส้นทางปล่อยปุ่มเดียวกับระบบมือถือของเกม
-        controller.touchSkillUp(slot)
+        -- ตาม signature แบบมี self ที่แสดงในรายงาน:
+        -- touchSkillDown(self, slot) → touchSkillUp(self, slot)
+        local downOK, downError = pcall(function()
+            controller:touchSkillDown(slot)
+        end)
+
+        -- ปล่อยให้ครบคู่ แม้ Down เกิดข้อผิดพลาดระหว่างทำงาน
+        local upOK, upError = pcall(function()
+            controller:touchSkillUp(slot)
+        end)
+
+        if not downOK then
+            if not upOK then
+                error(
+                    "Touch Down failed: " .. tostring(downError)
+                        .. " | Touch Up failed: " .. tostring(upError),
+                    0
+                )
+            end
+
+            error("Touch Down failed: " .. tostring(downError), 0)
+        end
+
+        if not upOK then
+            error("Touch Up failed: " .. tostring(upError), 0)
+        end
 
         -- ไม่ถือว่า Begin/Release สำเร็จเท่ากับเริ่มร่ายสำเร็จ
         local deadline = os.clock() + 0.6
@@ -7263,7 +7440,21 @@ do
                 end
             end
 
-            if not foundEnemy then return true end
+            local statusText = EnemyCountLabel
+                and EnemyCountLabel.Parent
+                and EnemyCountLabel.Text or ""
+
+            local starting = string.find(
+                string.lower(statusText),
+                "starting",
+                1,
+                true
+            ) ~= nil
+
+            -- วาร์ปได้ตั้งแต่เริ่มนับถอยหลัง หรือเมื่อพบมอน
+            if not starting and not foundEnemy then
+                return true
+            end
 
             if AutoFarmSession.Cancelled
                 or not AutoFarmEnabled then
@@ -7288,8 +7479,9 @@ do
             RuntimeFix.FateArenaCharacter = character
             CurrentAreaName = getLiveFarmArea() or "1"
 
-            -- ปล่อยให้ Auto Farm เลือกและตามมอนต่อทันที
-            return false
+            -- จบรอบลูปนี้ก่อน เพื่อไม่ให้คำสั่งตามมอน
+            -- ย้ายตัวออกจากจุดวาร์ปในรอบเดียวกัน
+            return true
         end
 
         local status = getRaidStatus()
