@@ -6472,8 +6472,7 @@ do
                 or not state
                 or (
                     state.skillKey ~= "2"
-                    and game:GetService("UserInputService").PreferredInput
-                        ~= Enum.PreferredInput.Touch
+                    and not game:GetService("UserInputService").TouchEnabled
                 )
                 or root ~= getCharacterRoot()
             then
@@ -6802,6 +6801,78 @@ do
         return ready == true
     end
 
+    function RuntimeFix.skillReady(slot)
+        if AutoFarmSession.Cancelled or not AutoFarmEnabled then
+            return false
+        end
+
+        local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+
+        if not playerGui
+            or playerGui:GetAttribute("MobileLayoutEditing") == true
+        then
+            return false
+        end
+
+        local humanoid = getHumanoid()
+
+        if not humanoid or humanoid.Health <= 0 or isGameSkillBusy() then
+            return false
+        end
+
+        local ok, ready = pcall(function()
+            if not ultimateNamespace then
+                ultimateNamespace = RuntimeFix.requireModule(
+                    ReplicatedStorage,
+                    { "game", "stores", "playerNamespace" }
+                )
+            end
+
+            assert(
+                ultimateNamespace
+                    and type(ultimateNamespace.getLocalPlayerStore) == "function"
+                    and type(ultimateNamespace.skillCooldownKey) == "function",
+                "Skill playerNamespace API unavailable"
+            )
+
+            local store = ultimateNamespace.getLocalPlayerStore()
+            local state = store and store.state
+
+            if not state or not state.character or not state.cooldowns then
+                return false
+            end
+
+            local characterName = state.character:get()
+
+            if type(characterName) ~= "string" or characterName == "" then
+                return false
+            end
+
+            local key = ultimateNamespace.skillCooldownKey(
+                characterName,
+                slot
+            )
+
+            local entry = state.cooldowns:get(key)
+            local cooldownTill = entry and entry:get() or 0
+
+            if type(cooldownTill) ~= "number"
+                or cooldownTill ~= cooldownTill
+            then
+                error("Invalid cooldown value: " .. tostring(key))
+            end
+
+            return workspace:GetServerTimeNow() >= cooldownTill
+        end)
+
+        if not ok then
+            RuntimeFix.skillIssue("Skill readiness read failed", ready)
+            return false
+        end
+
+        return ready == true
+    end
+
     function RuntimeFix.invokeAutoSkill(controller, slot, touchInput)
         if not touchInput then
             return controller.performSkill(slot)
@@ -6884,15 +6955,56 @@ do
             return false
         end
 
-        -- ตาม signature แบบมี self ที่แสดงในรายงาน:
-        -- touchSkillDown(self, slot) → touchSkillUp(self, slot)
+        assert(
+            type(aim.TouchHolds) == "function",
+            "MouseAim.TouchHolds unavailable"
+        )
+
+        local heldMode = aim.TouchHolds() == true
+
         local downOK, downError = pcall(function()
-            controller:touchSkillDown(slot)
+            if heldMode then
+                return controller.touchSkillDown(slot)
+            end
+
+            return controller.performSkill(slot)
         end)
 
-        -- ปล่อยให้ครบคู่ แม้ Down เกิดข้อผิดพลาดระหว่างทำงาน
         local upOK, upError = pcall(function()
-            controller:touchSkillUp(slot)
+            if heldMode then
+                controller.touchSkillUp(slot)
+            end
+
+            if not downOK
+                or AutoFarmSession.Cancelled
+                or not AutoFarmEnabled
+                or getCharacter() ~= character
+            then
+                return
+            end
+
+            if aim.IsAiming() and aim.AimingSlot() == slot then
+                assert(
+                    type(aim.Source) == "function",
+                    "MouseAim.Source unavailable"
+                )
+
+                if aim.Source() == "Tap" then
+                    assert(
+                        type(aim.Press) == "function",
+                        "MouseAim.Press unavailable"
+                    )
+
+                    aim.Press(slot)
+                else
+                    assert(
+                        type(aim.Release) == "function",
+                        "MouseAim.Release unavailable"
+                    )
+
+                    aim.Release(slot)
+                end
+            end
         end)
 
         if not downOK then
@@ -6960,13 +7072,16 @@ do
             return false
         end
 
+        if not RuntimeFix.skillReady(slot) then
+            return false
+        end
+
         if slot == 4 and not canUseUltimate() then
             return false
         end
 
         local touchInput =
-            game:GetService("UserInputService").PreferredInput
-                == Enum.PreferredInput.Touch
+            game:GetService("UserInputService").TouchEnabled
 
         if (slot == 2 or touchInput)
             and not RuntimeFix.ensureMouseAimAPI()
@@ -7244,7 +7359,9 @@ do
                 local skillKey = tostring(slot)
                 local lastAttempt = LastSkillActivation[skillKey] or 0
 
-                if now - lastAttempt >= retryDelay then
+                if now - lastAttempt >= retryDelay
+                    and RuntimeFix.skillReady(slot)
+                then
                     LastSkillActivation[skillKey] = now
 
                     if pressSkillKey(keyCodes[slot], worldPosition) then
