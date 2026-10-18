@@ -5243,8 +5243,7 @@ RuntimeFix.FarmOptions = {
                 or not state
                 or (
                     state.skillKey ~= "2"
-                    and game:GetService("UserInputService").PreferredInput
-                        ~= Enum.PreferredInput.Touch
+                    and not game:GetService("UserInputService").TouchEnabled
                 )
                 or root ~= getCharacterRoot()
             then
@@ -5808,8 +5807,7 @@ RuntimeFix.FarmOptions = {
         end
 
         local touchInput =
-            game:GetService("UserInputService").PreferredInput
-                == Enum.PreferredInput.Touch
+            game:GetService("UserInputService").TouchEnabled
 
         if (slot == 2 or touchInput)
             and not RuntimeFix.ensureMouseAimAPI()
