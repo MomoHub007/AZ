@@ -6105,6 +6105,99 @@ do
     local AimPointReplacement = nil
     local NextSkillAPICheck = 0
 
+    function RuntimeFix.fixSkillRequire(controller)
+        assert(
+            type(getfenv) == "function"
+                and type(setfenv) == "function",
+            "Skill environment API unavailable"
+        )
+
+        local fn = controller.performSkill
+        assert(type(fn) == "function", "performSkill unavailable")
+
+        local previous = RuntimeFix.SkillRequirePatch
+
+        if previous
+            and previous.Function == fn
+            and getfenv(fn) == previous.Environment then
+            return
+        end
+
+        if previous then
+            previous.Restore()
+            RuntimeFix.SkillRequirePatch = nil
+        end
+
+        local global = ReplicatedStorage:FindFirstChild("global")
+        local module = global and global:FindFirstChild("Flags")
+
+        assert(
+            module and module:IsA("ModuleScript"),
+            "ReplicatedStorage.global.Flags unavailable"
+        )
+
+        local flags = RuntimeFix.requireNativeSkillModule(module)
+
+        assert(
+            type(flags) == "table"
+                and type(flags.IsOn) == "function"
+                and type(flags.Skill) == "function",
+            "Flags API unavailable"
+        )
+
+        local original = getfenv(fn)
+        local originalRequire = original.require
+
+        assert(
+            type(originalRequire) == "function",
+            "performSkill require unavailable"
+        )
+
+        -- สร้าง environment แยก ไม่เขียนทับตารางเดิมของเกม
+        local environment = {}
+
+        for key, value in pairs(original) do
+            environment[key] = value
+        end
+
+        setmetatable(environment, { __index = original })
+
+        environment.require = function(target, ...)
+            if target == "@game/ReplicatedStorage/global/Flags" then
+                return flags
+            end
+
+            return originalRequire(target, ...)
+        end
+
+        local function restore()
+            if getfenv(fn) == environment then
+                setfenv(fn, original)
+            end
+        end
+
+        setfenv(fn, environment)
+
+        RuntimeFix.SkillRequirePatch = {
+            Function = fn,
+            Environment = environment,
+            Restore = restore,
+        }
+
+        if not RuntimeFix.SkillRequireCleanupRegistered then
+            RuntimeFix.SkillRequireCleanupRegistered = true
+
+            table.insert(AutoFarmSession.Cleanups, function()
+                local record = RuntimeFix.SkillRequirePatch
+                RuntimeFix.SkillRequirePatch = nil
+
+                if record then
+                    record.Restore()
+                end
+            end)
+        end
+    end
+
     local function ensureMouseFreeSkillAPI()
         if DirectCharacterController
             and PatchedInputController
@@ -6184,7 +6277,18 @@ do
             return nil
         end
 
-        if AutoFarmSession.Cancelled then return nil end
+        local requireReady, requireError = pcall(
+            RuntimeFix.fixSkillRequire,
+            characterController
+        )
+
+        if not requireReady then
+            RuntimeFix.skillIssue(
+                "Skill require setup failed",
+                requireError
+            )
+            return nil
+        end
 
         local originalAim = inputController.getAimPoint
 
