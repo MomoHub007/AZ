@@ -6006,6 +6006,63 @@ do
         )
     end
 
+    function RuntimeFix.requireNativeSkillModule(module)
+        assert(
+            typeof(module) == "Instance"
+                and module:IsA("ModuleScript"),
+            "Native skill loader expects a ModuleScript"
+        )
+
+        assert(type(getrenv) == "function", "getrenv unavailable")
+
+        local environment = getrenv()
+        local nativeRequire = environment and environment.require
+
+        assert(
+            type(nativeRequire) == "function",
+            "Native require unavailable"
+        )
+
+        assert(
+            type(getthreadidentity) == "function"
+                and type(setthreadidentity) == "function",
+            "Thread identity API unavailable"
+        )
+
+        local previousIdentity = getthreadidentity()
+
+        assert(
+            type(previousIdentity) == "number",
+            "Cannot read thread identity"
+        )
+
+        local ok, result = xpcall(function()
+            setthreadidentity(2)
+            return nativeRequire(module)
+        end, function(err)
+            return debug.traceback(tostring(err), 2)
+        end)
+
+        local restored, restoreError = pcall(
+            setthreadidentity,
+            previousIdentity
+        )
+
+        if not restored then
+            error(
+                "Native skill loader cannot restore identity: "
+                    .. tostring(restoreError),
+                0
+            )
+        end
+
+        if not ok then
+            error(result, 0)
+        end
+
+        return result
+    end
+
     local function isGameSkillBusy()
         local ok, busy = pcall(function()
             local scripts = LocalPlayer:FindFirstChild("PlayerScripts")
@@ -6017,7 +6074,8 @@ do
                 return false
             end
 
-            local playerStore = require(module)
+            local playerStore =
+                RuntimeFix.requireNativeSkillModule(module)
             local skill = playerStore.state.skill
 
             if not skill then
@@ -6105,8 +6163,11 @@ do
 
         local ok, characterController, inputController =
             pcall(function()
-                return require(characterModule),
-                    require(inputModule)
+                return RuntimeFix.requireNativeSkillModule(
+                    characterModule
+                ), RuntimeFix.requireNativeSkillModule(
+                    inputModule
+                )
             end)
 
         if not ok
@@ -6281,7 +6342,10 @@ do
             return false
         end
 
-        local ok, mouseAim = pcall(require, module)
+        local ok, mouseAim = pcall(
+            RuntimeFix.requireNativeSkillModule,
+            module
+        )
 
         if not ok
             or type(mouseAim) ~= "table"
