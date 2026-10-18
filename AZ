@@ -1,3 +1,4 @@
+    local AutoSkillWarn = warn
     local print = function() end
     local warn = function() end
 
@@ -4814,9 +4815,27 @@ RuntimeFix.FarmOptions = {
     end
 
     function RuntimeFix.skillIssue(reason, detail)
-    RuntimeFix.AutoSkillLastIssue =
-        reason .. " | " .. tostring(detail or "")
-end
+        RuntimeFix.AutoSkillLastIssue =
+            reason .. " | " .. tostring(detail)
+
+        RuntimeFix.SkillWarningAt =
+            RuntimeFix.SkillWarningAt or {}
+
+        local now = os.clock()
+
+        if now - (
+            RuntimeFix.SkillWarningAt[reason] or -math.huge
+        ) < 5 then
+            return
+        end
+
+        RuntimeFix.SkillWarningAt[reason] = now
+
+        AutoSkillWarn(
+            "[Zero X / Auto Skill] "
+                .. RuntimeFix.AutoSkillLastIssue
+        )
+    end
 
     local function isGameSkillBusy()
         local ok, busy = pcall(function()
@@ -4858,6 +4877,101 @@ end
     local OriginalGetAimPoint = nil
     local AimPointReplacement = nil
     local NextSkillAPICheck = 0
+
+    function RuntimeFix.fixSkillRequire(controller)
+        assert(
+            type(getfenv) == "function"
+                and type(setfenv) == "function",
+            "Skill environment API unavailable"
+        )
+
+        local fn = controller.performSkill
+        assert(type(fn) == "function", "performSkill unavailable")
+
+        local previous = RuntimeFix.SkillRequirePatch
+
+        if previous
+            and previous.Function == fn
+            and getfenv(fn) == previous.Environment then
+            return
+        end
+
+        if previous then
+            previous.Restore()
+            RuntimeFix.SkillRequirePatch = nil
+        end
+
+        local global = ReplicatedStorage:FindFirstChild("global")
+        local module = global and global:FindFirstChild("Flags")
+
+        assert(
+            module and module:IsA("ModuleScript"),
+            "ReplicatedStorage.global.Flags unavailable"
+        )
+
+        assert(type(getrenv) == "function", "getrenv unavailable")
+
+        local gameEnvironment = getrenv()
+        local nativeRequire =
+            gameEnvironment and gameEnvironment.require
+
+        assert(
+            type(nativeRequire) == "function",
+            "Native require unavailable"
+        )
+
+        local original = getfenv(fn)
+        local originalRequire = original.require
+
+        assert(
+            type(originalRequire) == "function",
+            "performSkill require unavailable"
+        )
+
+        local environment = {}
+
+        for key, value in pairs(original) do
+            environment[key] = value
+        end
+
+        setmetatable(environment, { __index = original })
+
+        environment.require = function(target, ...)
+            if target == "@game/ReplicatedStorage/global/Flags" then
+                -- ทำงานภายใต้ Identity ที่ pressSkillKey ตั้งไว้
+                return nativeRequire(module)
+            end
+
+            return originalRequire(target, ...)
+        end
+
+        local function restore()
+            if getfenv(fn) == environment then
+                setfenv(fn, original)
+            end
+        end
+
+        setfenv(fn, environment)
+
+        RuntimeFix.SkillRequirePatch = {
+            Function = fn,
+            Environment = environment,
+            Restore = restore,
+        }
+
+        if not RuntimeFix.SkillRequireCleanupRegistered then
+            RuntimeFix.SkillRequireCleanupRegistered = true
+
+            table.insert(AutoFarmSession.Cleanups, function()
+                local record = RuntimeFix.SkillRequirePatch
+                RuntimeFix.SkillRequirePatch = nil
+
+                if record then
+                    record.Restore()
+                end
+            end)
+        end
+    end
 
     local function ensureMouseFreeSkillAPI()
         if DirectCharacterController
@@ -4936,6 +5050,19 @@ end
         end
 
         if AutoFarmSession.Cancelled then return nil end
+
+        local fixed, fixError = pcall(
+            RuntimeFix.fixSkillRequire,
+            characterController
+        )
+
+        if not fixed then
+            RuntimeFix.skillIssue(
+                "Skill require setup failed",
+                fixError
+            )
+            return nil
+        end
 
         local originalAim = inputController.getAimPoint
 
@@ -5532,8 +5659,9 @@ end
         )
 
         assert(
-            type(controller.touchSkillUp) == "function",
-            "characterController.touchSkillUp unavailable"
+            type(controller.touchSkillDown) == "function"
+                and type(controller.touchSkillUp) == "function",
+            "Touch skill down/up API unavailable"
         )
 
         local character = getCharacter()
@@ -5581,40 +5709,46 @@ end
 
         local before = cooldown()
 
-        if aim.IsAiming() then
-            -- ไม่ปล่อยหรือยกเลิกการเล็งของสกิลช่องอื่น
-            if aim.AimingSlot() ~= slot then
-                RuntimeFix.skillIssue(
-                    "Touch aim belongs to another slot",
-                    "Requested=" .. slot
-                )
-                return false
-            end
-        else
-            local accepted = controller.performSkill(slot)
-
-            if not aim.IsAiming() then
-                return accepted == true
-            end
-
-            if aim.AimingSlot() ~= slot then
-                RuntimeFix.skillIssue(
-                    "Touch aim changed slot",
-                    "Requested=" .. slot
-                )
-                return false
-            end
+        -- ไม่แทรกการเล็งที่กำลังทำงาน และรอ Cooldown จริง
+        if before > workspace:GetServerTimeNow()
+            or aim.IsAiming() then
+            return false
         end
 
         if AutoFarmSession.Cancelled
             or not AutoFarmEnabled
-            or getCharacter() ~= character
-        then
+            or getCharacter() ~= character then
             return false
         end
 
-        -- ใช้เส้นทางปล่อยปุ่มเดียวกับระบบมือถือของเกม
-        controller.touchSkillUp(slot)
+        -- ใช้ self ตาม signature Touch ในรายงานที่ส่งมา
+        local downOK, downError = pcall(function()
+            controller:touchSkillDown(slot)
+        end)
+
+        -- ปล่อยให้ครบคู่ แม้ Down เกิดข้อผิดพลาด
+        local upOK, upError = pcall(function()
+            controller:touchSkillUp(slot)
+        end)
+
+        if not downOK then
+            error(
+                "Touch Down failed: " .. tostring(downError)
+                    .. (
+                        not upOK
+                        and " | Touch Up failed: " .. tostring(upError)
+                        or ""
+                    ),
+                0
+            )
+        end
+
+        if not upOK then
+            error(
+                "Touch Up failed: " .. tostring(upError),
+                0
+            )
+        end
 
         -- ไม่ถือว่า Begin/Release สำเร็จเท่ากับเริ่มร่ายสำเร็จ
         local deadline = os.clock() + 0.6
