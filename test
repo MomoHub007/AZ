@@ -1,5 +1,5 @@
 local AutoSkillWarn = warn
-local AUTO_SKILL_DEBUG = true -- หลังตรวจเสร็จเปลี่ยนเป็น false
+local AUTO_SKILL_DEBUG = false -- หลังตรวจเสร็จเปลี่ยนเป็น false
 
 
 
