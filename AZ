@@ -5720,14 +5720,58 @@ RuntimeFix.FarmOptions = {
             return false
         end
 
-        -- ใช้ self ตาม signature Touch ในรายงานที่ส่งมา
+        assert(
+            type(aim.TouchHolds) == "function",
+            "MouseAim.TouchHolds unavailable"
+        )
+
+        local heldMode = aim.TouchHolds() == true
+
         local downOK, downError = pcall(function()
-            controller:touchSkillDown(slot)
+            if heldMode then
+                return controller.touchSkillDown(slot)
+            end
+
+            return controller.performSkill(slot)
         end)
 
-        -- ปล่อยให้ครบคู่ แม้ Down เกิดข้อผิดพลาด
         local upOK, upError = pcall(function()
-            controller:touchSkillUp(slot)
+            -- คืนสถานะปุ่มที่กดไว้ แม้ Down เกิด Error
+            if heldMode then
+                controller.touchSkillUp(slot)
+            end
+
+            if not downOK
+                or AutoFarmSession.Cancelled
+                or not AutoFarmEnabled
+                or getCharacter() ~= character
+            then
+                return
+            end
+
+            -- ยืนยันเฉพาะ Aim ของช่องที่กำลังสั่ง
+            if aim.IsAiming() and aim.AimingSlot() == slot then
+                assert(
+                    type(aim.Source) == "function",
+                    "MouseAim.Source unavailable"
+                )
+
+                if aim.Source() == "Tap" then
+                    assert(
+                        type(aim.Press) == "function",
+                        "MouseAim.Press unavailable"
+                    )
+
+                    aim.Press(slot)
+                else
+                    assert(
+                        type(aim.Release) == "function",
+                        "MouseAim.Release unavailable"
+                    )
+
+                    aim.Release(slot)
+                end
+            end
         end)
 
         if not downOK then
