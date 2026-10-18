@@ -1327,6 +1327,7 @@ end
             "hxh",
             "spiritedawayraid",
             "sololevelingraid",
+            allowedMaps and allowedMaps.fateraid and "fateraid" or nil,
         }) do
             if not allowedMaps or allowedMaps[map] then
                 local chapters = tables[map]
@@ -2474,6 +2475,60 @@ end
         RuntimeFix.startAutoEndAction()
     end
 
+function RuntimeFix.farmOption(name, fallback)
+    local combat = AZUserSettings.Combat
+    local value = nil
+
+    if type(combat) == "table" then
+        value = combat[name]
+    end
+
+    if value == nil then
+        value = fallback
+    end
+
+    return { Value = value }
+end
+
+RuntimeFix.FarmOptions = {
+    ZeroXFarmPosition =
+        RuntimeFix.farmOption("FarmPosition", "Orbit"),
+
+    ZeroXFarmHeight =
+        RuntimeFix.farmOption("FarmHeight", 6),
+
+    ZeroXFarmDistance =
+        RuntimeFix.farmOption("FarmDistance", 4),
+
+    ZeroXFarmOrbitSpeed =
+        RuntimeFix.farmOption("FarmOrbitSpeed", 90),
+
+    ZeroXSelectedSkills =
+        RuntimeFix.farmOption("SelectedSkills", {
+            ["Skill 1"] = true,
+            ["Skill 2"] = true,
+            ["Skill 3"] = true,
+        }),
+
+    ZeroXUltimateOnlyBoss =
+        RuntimeFix.farmOption("UltimateOnlyBoss", false),
+
+    ZeroXEnableSkillCombo =
+        RuntimeFix.farmOption("EnableSkillCombo", false),
+
+    ZeroXSkillCombo =
+        RuntimeFix.farmOption("SkillCombo", "1-2-3"),
+
+    ZeroXRetreatHeal =
+        RuntimeFix.farmOption("RetreatHeal", true),
+
+    ZeroXHealStartPercent =
+        RuntimeFix.farmOption("RetreatBelow", 30),
+
+    ZeroXHealResumePercent =
+        RuntimeFix.farmOption("ResumeAt", 70),
+}
+
     local EnemyCountLabel = nil
 
     local RaidTag = PlayerGui:FindFirstChild("RunSide")
@@ -2681,6 +2736,20 @@ end
             and isInRaid() == true
     end
 
+    local function isFateRaid()
+        return workspace:GetAttribute("Mode") == "fateraid"
+    end
+
+    local function isRaidBossGuarded()
+        return (isShadowGateRaid() or isFateRaid()) and (
+            workspace:GetAttribute("RaidBossGuarded") == true
+            or (
+                tonumber(workspace:GetAttribute("RaidOathCount"))
+                or 0
+            ) > 0
+        )
+    end
+
     local farmRunStore = nil
 
     local function getLiveFarmArea()
@@ -2726,8 +2795,8 @@ end
             return getLiveFarmArea() or area
         end
 
-        if isShadowGateRaid() then
-            return "1"
+        if isShadowGateRaid() or isFateRaid() then
+            return getLiveFarmArea() or "1"
         end
 
         return "Infinite"
@@ -2794,9 +2863,159 @@ end
         return root
     end
 
-    --==================================================
-    -- Find Target
-    --==================================================
+    local fateEnemyModules
+
+    local function readFateEnemy(enemy)
+        if not enemy or not enemy:IsA("Model") then
+            return nil
+        end
+
+        local id = tonumber(enemy.Name)
+
+        if not id then
+            return nil
+        end
+
+        if not fateEnemyModules then
+            local store = RuntimeFix.requireModule(
+                ReplicatedStorage,
+                { "game", "stores", "enemyStore" }
+            )
+
+            local definitions = RuntimeFix.requireModule(
+                ReplicatedStorage,
+                { "global", "constants", "enemies" }
+            )
+
+            assert(
+                store.store and store.store.state,
+                "Fate enemyStore unavailable"
+            )
+
+            assert(
+                type(definitions.enemiesByName) == "table",
+                "Fate enemiesByName unavailable"
+            )
+
+            fateEnemyModules = {
+                state = store.store.state,
+                definitions = definitions.enemiesByName,
+            }
+        end
+
+        local state = fateEnemyModules.state
+        local entry
+
+        if type(state.get) == "function" then
+            entry = state:get(id)
+        elseif state.entries then
+            entry = state.entries[id]
+        end
+
+        if not entry or not entry.name
+            or type(entry.name.get) ~= "function" then
+
+            return nil
+        end
+
+        local key = entry.name:get()
+
+        if type(key) ~= "string" then
+            return nil
+        end
+
+        local definition = fateEnemyModules.definitions[key]
+
+        if type(definition) ~= "table" then
+            return nil
+        end
+
+        return key, definition.boss == true
+    end
+
+    local function getFateTarget(areaName)
+        local enemies = workspace:FindFirstChild("enemies")
+        local root = getCharacterRoot()
+
+        if not enemies or not root
+            or not getAreaPart(areaName) then
+
+            return nil
+        end
+
+        local guarded = isRaidBossGuarded()
+
+        local oath
+        local minion
+        local boss
+
+        local oathDistance = math.huge
+        local minionDistance = math.huge
+        local bossDistance = math.huge
+
+        for _, enemy in ipairs(enemies:GetChildren()) do
+            if not enemy:IsA("Model")
+                or not isEnemyAlive(enemy) then
+
+                continue
+            end
+
+            local enemyRoot = getEnemyRoot(enemy)
+
+            if not enemyRoot then
+                continue
+            end
+
+            local area = getAreaByPosition(enemyRoot.Position)
+
+            if not area
+                or tostring(area.Name) ~= tostring(areaName) then
+
+                continue
+            end
+
+            local key, isBoss = readFateEnemy(enemy)
+
+            -- ข้อมูลยังไม่มา ให้รอ ไม่เดาจาก HP/Shield
+            if not key then
+                continue
+            end
+
+            local distance =
+                (root.Position - enemyRoot.Position).Magnitude
+
+            if guarded and key == "fateOath"
+                and distance < oathDistance then
+
+                oath = enemy
+                oathDistance = distance
+            end
+
+            if isBoss then
+                if distance < bossDistance then
+                    boss = enemy
+                    bossDistance = distance
+                end
+            elseif distance < minionDistance then
+                minion = enemy
+                minionDistance = distance
+            end
+        end
+
+        if oath then
+            return oath
+        end
+
+        if minion then
+            return minion
+        end
+
+        if not guarded then
+            return boss
+        end
+
+        return nil
+    end
 
     local KnownBossNames = {
         spiritedkaonashi = true,
@@ -2816,6 +3035,11 @@ end
 
     local function isEnemyBoss(enemy: Instance): boolean
         if not enemy then return false end
+
+        if isFateRaid() then
+            local _, boss = readFateEnemy(enemy)
+            return boss == true
+        end
 
         -- 1. Check custom attributes or tags on Model
         if enemy:GetAttribute("Boss") == true or enemy:GetAttribute("IsBoss") == true then
@@ -2914,6 +3138,10 @@ end
     end
 
     local function getNearestEnemyInArea(areaName)
+        if isFateRaid() then
+            return getFateTarget(areaName)
+        end
+
         local enemies = workspace:FindFirstChild("enemies")
 
         if not enemies then
@@ -3028,7 +3256,7 @@ end
     -- Root Tween Helper
     --==================================================
 
-    RuntimeFix.TravelSpeed = 90 -- studs ต่อวินาที
+    RuntimeFix.TravelSpeed = 80 -- studs ต่อวินาที
 
     function RuntimeFix.tweenRootTo(targetCFrame, canContinue)
         local character = getCharacter()
@@ -3213,6 +3441,16 @@ end
 
     -- โหมดทดลอง: ร่างจริงอยู่เหนือมอน ร่างปลอมอยู่ใกล้มอน
     local function stopHover()
+        RuntimeFix.FloodHolding = nil
+
+        if RuntimeFix.FloodPrompt then
+            pcall(function()
+                RuntimeFix.FloodPrompt:InputHoldEnd()
+            end)
+
+            RuntimeFix.FloodPrompt = nil
+        end
+
         if RuntimeFix.RootTweenCleanup then
             RuntimeFix.RootTweenCleanup()
         end
@@ -3467,6 +3705,10 @@ end
                 return false
             end
 
+            if AutoFarmSession.Cancelled or not AutoFarmEnabled then
+                return false
+            end
+
             skillState = result
         end
 
@@ -3480,9 +3722,14 @@ end
                 )
         end
 
+        local floodContext =
+            RuntimeFix.isFlood() and RuntimeFix.floodKey()
+
+        -- ค่าตำแหน่งตอนใช้สกิล
         local TARGET_TWEEN_DISTANCE = 100
         local useBathTween =
             workspace:GetAttribute("Mode") == "spiritedawayraid"
+            or RuntimeFix.isFlood()
 
         -- เก็บก่อน stopHover ล้าง CurrentTarget
         local changingTarget =
@@ -3502,13 +3749,22 @@ end
         local offset = root.Position - enemyRoot.Position
         local angle = math.atan2(offset.Z, offset.X)
 
-        local function getPosition(targetRoot, usingSkill)
+        local function getRawPosition(targetRoot, usingSkill)
             local center = targetRoot.Position
 
-            if usingSkill and not retreatMode then
-                -- LookVector ชี้ด้านหน้า จึงลบเพื่อไปด้านหลัง
-                local forward =
-                    targetRoot.CFrame.LookVector * Vector3.new(1, 0, 1)
+            -- คงตำแหน่งถอยฟื้นเลือดเดิม
+            if retreatMode then
+                return center + Vector3.new(
+                    math.cos(angle) * radius,
+                    height,
+                    math.sin(angle) * radius
+                )
+            end
+
+            -- คงตำแหน่งด้านหลังขณะใช้สกิลตามระบบเดิม
+            if usingSkill then
+                local forward = targetRoot.CFrame.LookVector
+                    * Vector3.new(1, 0, 1)
 
                 if forward.Magnitude < 0.001 then
                     forward = Vector3.new(0, 0, -1)
@@ -3521,13 +3777,52 @@ end
                     + Vector3.new(0, SKILL_BEHIND_Y, 0)
             end
 
-            -- ตีธรรมดา: Below + Orbit เดิม
-            -- ถอยฮีล: ใช้ height และ radius ของ Retreat เดิม
-            return center + Vector3.new(
-                math.cos(angle) * radius,
-                height,
-                math.sin(angle) * radius
+            local positionOption = RuntimeFix.FarmOptions.ZeroXFarmPosition
+            local heightOption = RuntimeFix.FarmOptions.ZeroXFarmHeight
+            local distanceOption = RuntimeFix.FarmOptions.ZeroXFarmDistance
+
+            local mode = positionOption and positionOption.Value or "Orbit"
+
+            local selectedHeight = math.clamp(
+                tonumber(heightOption and heightOption.Value)
+                    or math.abs(BELOW_DEPTH),
+                1,
+                30
             )
+
+            if mode == "Below" then
+                return center + Vector3.new(0, -selectedHeight, 0)
+            elseif mode == "Above" then
+                return center + Vector3.new(0, selectedHeight, 0)
+            end
+
+            local selectedRadius = math.clamp(
+                tonumber(distanceOption and distanceOption.Value)
+                    or ORBIT_RADIUS,
+                0,
+                30
+            )
+
+            return center + Vector3.new(
+                math.cos(angle) * selectedRadius,
+                selectedHeight,
+                math.sin(angle) * selectedRadius
+            )
+        end
+
+        local function getPosition(targetRoot, usingSkill)
+            local position = RuntimeFix.floodSafe(
+                getRawPosition(targetRoot, usingSkill)
+            )
+
+            local gate = RuntimeFix.FloodCombatGate
+
+            if gate and gate.Parent then
+                return RuntimeFix.floodGatePosition(position, gate)
+                    or RuntimeFix.floodSafe(gate.Position)
+            end
+
+            return position
         end
 
         local function getFacing(position, center)
@@ -3574,7 +3869,11 @@ end
                     function()
                         local targetRoot = getEnemyRoot(enemy)
 
-                        if CurrentTarget ~= enemy
+                        if (
+                            floodContext
+                            and RuntimeFix.floodKey() ~= floodContext
+                        )
+                            or CurrentTarget ~= enemy
                             or not isEnemyAlive(enemy)
                             or not targetRoot
                             or not targetRoot.Parent
@@ -3582,10 +3881,18 @@ end
                             return false
                         end
 
-                        -- ตรวจระหว่าง Tween ไปหาบอส Shadow Gate
+                        -- ตรวจระหว่าง Tween ไปหาบอส Shadow Gate หรือ Fate
                         if not retreatMode
-                            and isShadowGateRaid()
-                            and isShadowGateMainBoss(enemy)
+                            and (
+                                (
+                                    isShadowGateRaid()
+                                    and isShadowGateMainBoss(enemy)
+                                )
+                                or (
+                                    isFateRaid()
+                                    and isEnemyBoss(enemy)
+                                )
+                            )
                         then
                             local hasMinions = CurrentAreaName ~= nil
                                 and hasMinionsAliveInArea(CurrentAreaName)
@@ -3692,7 +3999,11 @@ end
                 return
             end
 
-            if AutoFarmSession.Cancelled
+            if (
+                floodContext
+                and RuntimeFix.floodKey() ~= floodContext
+            )
+                or AutoFarmSession.Cancelled
                 or not AutoFarmEnabled
                 or getCharacter() ~= character
                 or not root.Parent
@@ -3721,8 +4032,25 @@ end
 
             local usingSkill = not retreatMode and isUsingSkill()
 
-            -- หยุด Orbit ระหว่างสกิล
-            if not retreatMode and not usingSkill and not aimLocked then
+            local positionOption = RuntimeFix.FarmOptions.ZeroXFarmPosition
+            local positionMode = positionOption
+                and positionOption.Value or "Orbit"
+
+            if not retreatMode
+                and not usingSkill
+                and not aimLocked
+                and positionMode == "Orbit" then
+
+                local speedOption = RuntimeFix.FarmOptions.ZeroXFarmOrbitSpeed
+                local degreesPerSecond = math.clamp(
+                    tonumber(speedOption and speedOption.Value)
+                        or (360 / math.max(0.5, ORBIT_SECONDS_PER_REVOLUTION)),
+                    0,
+                    360
+                )
+
+                angularSpeed = math.rad(degreesPerSecond)
+
                 angle = (
                     angle + angularSpeed * math.min(deltaTime, 0.1)
                 ) % (math.pi * 2)
@@ -3730,6 +4058,25 @@ end
 
             local center = currentEnemyRoot.Position
             local targetPosition = getPosition(currentEnemyRoot, usingSkill)
+
+            -- ดึงกลับเข้าเขตเฉพาะเมื่อถูกผลักหรือสกิลพาออกไป
+            local gate = RuntimeFix.FloodCombatGate
+
+            if gate and gate.Parent
+                and (root.Position - gate.Position).Magnitude > 18 then
+
+                local bounded = RuntimeFix.floodGatePosition(
+                    root.Position,
+                    gate
+                )
+
+                if bounded then
+                    root.CFrame =
+                        CFrame.new(bounded) * root.CFrame.Rotation
+
+                    root.AssemblyLinearVelocity = Vector3.zero
+                end
+            end
 
             positionAlign.Position = targetPosition
 
@@ -3766,66 +4113,7 @@ end
         return true
     end
 
-    --==================================================
-    -- Retreat Heal
-    --==================================================
 
-    local function startRetreatHeal()
-        if IsHealing or not CurrentTarget then
-            return
-        end
-
-        if not isEnemyAlive(CurrentTarget) then
-            stopHover()
-            return
-        end
-
-        if not startHover(CurrentTarget, HEAL_RETREAT_HEIGHT, true) then
-            return
-        end
-
-        IsHealing = true
-
-        print(
-            "[AutoFarm] Retreat Heal START | Health:",
-            getHealthPercent() .. "%"
-        )
-    end
-
-    local function updateRetreatHeal()
-        if not IsHealing then
-            return false
-        end
-
-        if not CurrentTarget or not isEnemyAlive(CurrentTarget) then
-            IsHealing = false
-            stopHover()
-            return false
-        end
-
-        local healthPercent = getHealthPercent()
-
-        if healthPercent < HEAL_RESUME_PERCENT then
-            return true
-        end
-
-        IsHealing = false
-
-        print(
-            "[AutoFarm] Retreat Heal END | Health:",
-            healthPercent .. "%"
-        )
-
-        local target = CurrentTarget
-
-        if target and isEnemyAlive(target) then
-            startHover(target, BELOW_DEPTH)
-        else
-            CurrentTarget = nil
-        end
-
-        return false
-    end
 
     --==================================================
     -- Teleport Area
@@ -4155,7 +4443,7 @@ end
         local token = {}
         RuntimeFix.RubbleRepeatToken = token
 
-        task.spawn(function()
+        RuntimeFix.spawnFarmTask(function()
             local ok, err = pcall(function()
                 while RuntimeFix.RubbleRepeatToken == token
                     and not AutoFarmSession.Cancelled
@@ -4525,6 +4813,11 @@ end
         return position
     end
 
+    function RuntimeFix.skillIssue(reason, detail)
+    RuntimeFix.AutoSkillLastIssue =
+        reason .. " | " .. tostring(detail or "")
+end
+
     local function isGameSkillBusy()
         local ok, busy = pcall(function()
             local scripts = LocalPlayer:FindFirstChild("PlayerScripts")
@@ -4575,9 +4868,12 @@ end
             return DirectCharacterController
         end
 
-        -- ไม่เขียนทับหากระบบอื่นแก้ API ไปแล้ว
+        -- Reference เปลี่ยน: โหลดและผูกใหม่ผ่าน retry เดิม
         if PatchedInputController then
-            return nil
+            DirectCharacterController = nil
+            PatchedInputController = nil
+            OriginalGetAimPoint = nil
+            AimPointReplacement = nil
         end
 
         if os.clock() < NextSkillAPICheck then
@@ -4615,7 +4911,7 @@ end
             or not inputModule
             or not inputModule:IsA("ModuleScript")
         then
-            warn("[AutoSkill] Controller modules unavailable")
+            RuntimeFix.skillIssue("Controller modules unavailable")
             return nil
         end
 
@@ -4631,9 +4927,15 @@ end
             or type(inputController) ~= "table"
             or type(inputController.getAimPoint) ~= "function"
         then
-            warn("[AutoSkill] Direct Skill API unavailable")
+            RuntimeFix.skillIssue(
+                "Direct Skill API unavailable",
+                not ok and characterController
+                    or "ตรวจ performSkill / getAimPoint"
+            )
             return nil
         end
+
+        if AutoFarmSession.Cancelled then return nil end
 
         local originalAim = inputController.getAimPoint
 
@@ -4693,7 +4995,10 @@ end
         end)
 
         if not patched then
-            warn("[AutoSkill] Aim API patch failed:", patchError)
+            RuntimeFix.skillIssue(
+                "Aim API patch failed",
+                patchError
+            )
             return nil
         end
 
@@ -4757,9 +5062,12 @@ end
             RuntimeFix.MouseAimPatch = patch
         end
 
-        if patch.Module then
-            return patch.Module.Get == patch.Replacement
+        if patch.Module
+            and patch.Module.Get == patch.Replacement then
+            return true
         end
+
+        -- หาก reference เปลี่ยน ให้ลองผูกใหม่ผ่าน NextAttempt
 
         if AutoFarmSession.Cancelled
             or os.clock() < patch.NextAttempt
@@ -4793,6 +5101,8 @@ end
         then
             return false
         end
+
+        if AutoFarmSession.Cancelled then return false end
 
         local original = mouseAim.Get
 
@@ -4893,16 +5203,22 @@ end
         patch.Original = original
         patch.Replacement = replacement
 
-        -- คืนฟังก์ชันเดิมเมื่อหยุดหรือรันสคริปต์ใหม่
-        table.insert(AutoFarmSession.Cleanups, function()
-            if mouseAim.Get == replacement then
-                mouseAim.Get = original
-            end
+        -- ลงทะเบียนครั้งเดียว แม้มีการผูก API ใหม่
+        if not patch.CleanupRegistered then
+            patch.CleanupRegistered = true
 
-            if RuntimeFix.MouseAimPatch == patch then
-                RuntimeFix.MouseAimPatch = nil
-            end
-        end)
+            table.insert(AutoFarmSession.Cleanups, function()
+                if patch.Module
+                    and patch.Module.Get == patch.Replacement then
+
+                    patch.Module.Get = patch.Original
+                end
+
+                if RuntimeFix.MouseAimPatch == patch then
+                    RuntimeFix.MouseAimPatch = nil
+                end
+            end)
+        end
 
         local logger = warn
 
@@ -4911,6 +5227,212 @@ end
         end
 
         return true
+    end
+
+    local ultimateBossModules = nil
+
+    local function isUltimateBoss(target)
+        if not target
+            or not target.Parent
+            or not target:IsA("Model") then
+            return false
+        end
+
+        local id = tonumber(target.Name)
+        if not id then return false end
+
+        local ok, result = pcall(function()
+            if not ultimateBossModules then
+                local enemies = RuntimeFix.requireModule(
+                    ReplicatedStorage,
+                    { "global", "constants", "enemies" }
+                )
+
+                local maps = RuntimeFix.requireModule(
+                    ReplicatedStorage,
+                    { "global", "constants", "maps" }
+                )
+
+                local enemyStore = RuntimeFix.requireModule(
+                    ReplicatedStorage,
+                    { "game", "stores", "enemyStore" }
+                )
+
+                assert(type(enemies.enemiesByName) == "table",
+                    "enemiesByName unavailable")
+
+                assert(type(maps.mapsByName) == "table",
+                    "mapsByName unavailable")
+
+                assert(enemyStore.store
+                    and enemyStore.store.state
+                    and type(enemyStore.store.state.get) == "function",
+                    "enemyStore.state:get unavailable")
+
+                ultimateBossModules = {
+                    Enemies = enemies,
+                    Maps = maps,
+                    Store = enemyStore,
+                }
+            end
+
+            if AutoFarmSession.Cancelled
+                or target ~= CurrentTarget
+                or not target.Parent then
+                return false
+            end
+
+            local modules = ultimateBossModules
+            local entry = modules.Store.store.state:get(id)
+
+            if not entry or not entry.name
+                or type(entry.name.get) ~= "function" then
+                return false
+            end
+
+            local enemyKey = entry.name:get()
+
+            if type(enemyKey) ~= "string" or enemyKey == "" then
+                return false
+            end
+
+            -- เกณฑ์ที่ 1: Definition ของศัตรูระบุ boss จริง
+            local definition = modules.Enemies.enemiesByName[enemyKey]
+
+            if definition and definition.boss == true then
+                return true
+            end
+
+            -- เกณฑ์ที่ 2: แมปปัจจุบันระบุเป็นบอสของ Chapter/Defense
+            local maps = modules.Maps
+            local map = maps.mapsByName[maps.currentMap]
+
+            if type(map) ~= "table" then
+                return false
+            end
+
+            if type(map.chapters) == "table" then
+                for _, chapter in pairs(map.chapters) do
+                    if type(chapter) == "table"
+                        and chapter.boss == enemyKey then
+                        return true
+                    end
+                end
+            end
+
+            local defense = map.defense
+
+            if type(defense) == "table"
+                and type(defense.bosses) == "table" then
+
+                for _, bossKey in pairs(defense.bosses) do
+                    if bossKey == enemyKey then
+                        return true
+                    end
+                end
+            end
+
+            return false
+        end)
+
+        if not ok then
+            warn("[AutoUltimate] Boss lookup failed:", result)
+            return false
+        end
+
+        return result == true
+    end
+
+    local ultimateNamespace = nil
+
+    local function canUseUltimate()
+        if AutoFarmSession.Cancelled
+            or not AutoFarmEnabled
+            or LocalPlayer:GetAttribute("UltimateLocked")
+            or isGameSkillBusy() then
+            return false
+        end
+
+        local onlyBoss = RuntimeFix.FarmOptions.ZeroXUltimateOnlyBoss
+
+        if onlyBoss and onlyBoss.Value == true then
+            local target = CurrentTarget
+
+            -- ไม่ใช้ Ultimate กับ Rubble หรือเมื่อไม่มีเป้าหมายที่มีชีวิต
+            if RubbleModeActive
+                or not target
+                or not target.Parent
+                or not target:IsA("Model")
+                or not isEnemyAlive(target)
+                or not getEnemyRoot(target) then
+                return false
+            end
+
+            if not isUltimateBoss(target) then
+                return false
+            end
+        end
+
+        local humanoid = getHumanoid()
+
+        if not humanoid or humanoid.Health <= 0 then
+            return false
+        end
+
+        local ok, ready = pcall(function()
+            if not ultimateNamespace then
+                ultimateNamespace = RuntimeFix.requireModule(
+                    ReplicatedStorage,
+                    { "game", "stores", "playerNamespace" }
+                )
+            end
+
+            if AutoFarmSession.Cancelled then return false end
+
+            assert(type(ultimateNamespace.getLocalPlayerStore) == "function"
+                and type(ultimateNamespace.skillCooldownKey) == "function",
+                "Ultimate playerNamespace API unavailable")
+
+            local store = ultimateNamespace.getLocalPlayerStore()
+            local state = store and store.state
+
+            if not state or not state.ultProgress
+                or not state.character or not state.cooldowns then
+                return false
+            end
+
+            local progress = state.ultProgress:get()
+            local characterName = state.character:get()
+
+            if type(progress) ~= "number"
+                or progress ~= progress
+                or progress < 100
+                or type(characterName) ~= "string"
+                or characterName == "" then
+                return false
+            end
+
+            local key = ultimateNamespace.skillCooldownKey(
+                characterName, 4
+            )
+
+            local cooldown = state.cooldowns:get(key)
+            local cooldownTill = cooldown and cooldown:get() or 0
+
+            if type(cooldownTill) ~= "number"
+                or cooldownTill ~= cooldownTill then
+                return false
+            end
+
+            return workspace:GetServerTimeNow() >= cooldownTill
+        end)
+
+        if not ok then
+            warn("[AutoUltimate] Readiness check failed:", ready)
+            return false
+        end
+
+        return ready == true
     end
 
     local function pressSkillKey(keyCode, worldPosition)
@@ -4925,12 +5447,20 @@ end
             keyCode == Enum.KeyCode.One and 1
             or keyCode == Enum.KeyCode.Two and 2
             or keyCode == Enum.KeyCode.Three and 3
+            or keyCode == Enum.KeyCode.G and 4
 
         if not slot then
             return false
         end
 
+        if slot == 4 and not canUseUltimate() then
+            return false
+        end
+
         if slot == 2 and not RuntimeFix.ensureMouseAimAPI() then
+            RuntimeFix.skillIssue(
+                "Skill 2 MouseAim API unavailable"
+            )
             return false
         end
 
@@ -4938,12 +5468,16 @@ end
         local controller = ensureMouseFreeSkillAPI()
 
         if not controller then
+            RuntimeFix.skillIssue(
+                "Skill controller not ready",
+                "Slot=" .. slot
+            )
             return false
         end
 
         local state = {
             skillKey = tostring(slot),
-            target = worldPosition and nil or CurrentTarget,
+            target = CurrentTarget,
             worldPosition = worldPosition,
             expires = os.clock() + (
                 slot == 2
@@ -4952,9 +5486,17 @@ end
             ),
         }
 
+        if worldPosition ~= nil then
+            state.target = nil
+        end
+
         local position = getTrackedAimPosition(state)
 
         if not position then
+            RuntimeFix.skillIssue(
+                "No valid skill target",
+                "Slot=" .. slot
+            )
             return false
         end
 
@@ -4994,20 +5536,89 @@ end
             return false
         end
 
-        -- เรียก Skill ผ่านระบบเกมโดยตรง
-        -- ไม่ใช้ keypress / SendKeyEvent
-        local success, result = pcall(function()
-            return controller.performSkill(slot)
-        end)
-
-        if not success then
+        -- ตรวจซ้ำก่อนเรียก Controller เผื่อเป้าหมายเปลี่ยนระหว่างเตรียมสกิล
+        if slot == 4 and not canUseUltimate() then
             SkillAimState = nil
-            warn("[AutoSkill] Direct Skill failed:", result)
             return false
         end
 
-        if result == false then
+        -- เรียก Skill ผ่านระบบเกมโดยตรง
+        -- ไม่ใช้ keypress / SendKeyEvent
+        local readIdentity = getthreadidentity
+        local changeIdentity = setthreadidentity
+
+        if type(readIdentity) ~= "function"
+            or type(changeIdentity) ~= "function" then
+
             SkillAimState = nil
+
+            RuntimeFix.skillIssue(
+                "Thread identity API unavailable",
+                "ต้องมี getthreadidentity และ setthreadidentity"
+            )
+
+            return false
+        end
+
+        local identityOK, previousIdentity = pcall(readIdentity)
+
+        if not identityOK
+            or type(previousIdentity) ~= "number" then
+
+            SkillAimState = nil
+
+            RuntimeFix.skillIssue(
+                "Cannot read thread identity",
+                previousIdentity
+            )
+
+            return false
+        end
+
+        local success, result = xpcall(function()
+            -- ใช้บริบทสคริปต์เกมเฉพาะช่วงเรียกสกิล
+            changeIdentity(2)
+
+            return controller.performSkill(slot)
+        end, function(err)
+            return debug.traceback(tostring(err), 2)
+        end)
+
+        -- คืนค่าเดิมทั้งกรณีสำเร็จและเกิด Error
+        local restored, restoreError = pcall(
+            changeIdentity,
+            previousIdentity
+        )
+
+        if not restored then
+            SkillAimState = nil
+
+            error(
+                "Auto Skill: cannot restore thread identity: "
+                    .. tostring(restoreError),
+                0
+            )
+        end
+
+        if not success then
+            SkillAimState = nil
+
+            RuntimeFix.skillIssue(
+                "performSkill exception: Slot=" .. slot,
+                result
+            )
+
+            return false
+        end
+
+        if result ~= true then
+            SkillAimState = nil
+
+            RuntimeFix.skillIssue(
+                "performSkill not accepted: Slot=" .. slot,
+                result
+            )
+
             return false
         end
 
@@ -5021,19 +5632,79 @@ end
         return true
     end
 
+    local SkillComboOrders = {
+        ["1-2-3"] = { 1, 2, 3 },
+        ["1-3-2"] = { 1, 3, 2 },
+        ["2-1-3"] = { 2, 1, 3 },
+        ["2-3-1"] = { 2, 3, 1 },
+        ["3-1-2"] = { 3, 1, 2 },
+        ["3-2-1"] = { 3, 2, 1 },
+    }
+
     local function useReadySkills(worldPosition)
         if AutoFarmSession.Cancelled
             or not AutoFarmEnabled
             or not AZEnabled("Combat", "AutoSkills")
-            or isGameSkillBusy()
-        then
+            or isGameSkillBusy() then
             return
         end
 
         if SkillAimState
-            and os.clock() < SkillAimState.expires
-        then
+            and os.clock() < SkillAimState.expires then
             return
+        end
+
+        -- Multi Dropdown ของ MacUI เก็บค่าเป็น { [ชื่อรายการ] = true }
+        local selectedOption = RuntimeFix.FarmOptions.ZeroXSelectedSkills
+        local selected = selectedOption and selectedOption.Value
+
+        if type(selected) ~= "table" then
+            return
+        end
+
+        local now = os.clock()
+        local retryDelay = math.max(
+            0.75,
+            SKILL_ACTIVATION_RETRY_DELAY
+        )
+
+        -- Ultimate มีความสำคัญก่อน Combo เมื่อเลือกไว้และพร้อมใช้
+        if selected["Ultimate (G)"] == true then
+            local lastAttempt = LastSkillActivation["4"] or 0
+
+            if now - lastAttempt >= retryDelay
+                and canUseUltimate() then
+
+                LastSkillActivation["4"] = now
+
+                if pressSkillKey(Enum.KeyCode.G, worldPosition) then
+                    return
+                end
+
+                if isGameSkillBusy() then
+                    return
+                end
+            end
+        end
+
+        local comboToggle = RuntimeFix.FarmOptions.ZeroXEnableSkillCombo
+        local comboEnabled = comboToggle
+            and comboToggle.Value == true
+
+        local comboOption = RuntimeFix.FarmOptions.ZeroXSkillCombo
+        local selectedCombo = comboEnabled
+            and comboOption and comboOption.Value or "1-2-3"
+
+        local order = SkillComboOrders[selectedCombo]
+        if not order then return end
+
+        local orderKey = (comboEnabled and "Combo:" or "Default:")
+            .. selectedCombo
+
+        -- เปลี่ยนลำดับหรือเปิด/ปิด Combo ให้เริ่มลำดับใหม่
+        if RuntimeFix.ActiveSkillCombo ~= orderKey then
+            RuntimeFix.ActiveSkillCombo = orderKey
+            RuntimeFix.NextAutoSkillSlot = 1
         end
 
         local keyCodes = {
@@ -5042,32 +5713,27 @@ end
             Enum.KeyCode.Three,
         }
 
-        local now = os.clock()
-        local retryDelay = math.max(
-            0.75,
-            SKILL_ACTIVATION_RETRY_DELAY
-        )
+        local firstIndex = RuntimeFix.NextAutoSkillSlot or 1
 
-        local firstSlot = RuntimeFix.NextAutoSkillSlot or 1
+        for offset = 0, #order - 1 do
+            local index = ((firstIndex - 1 + offset) % #order) + 1
+            local slot = order[index]
 
-        for offset = 0, 2 do
-            local slot = ((firstSlot - 1 + offset) % 3) + 1
-            local skillKey = tostring(slot)
-            local lastAttempt = LastSkillActivation[skillKey] or 0
+            if selected["Skill " .. tostring(slot)] == true then
+                local skillKey = tostring(slot)
+                local lastAttempt = LastSkillActivation[skillKey] or 0
 
-            if now - lastAttempt >= retryDelay then
-                -- จำกัดคำขอ แม้ Controller ปฏิเสธเพราะ Cooldown
-                LastSkillActivation[skillKey] = now
-                RuntimeFix.NextAutoSkillSlot = (slot % 3) + 1
+                if now - lastAttempt >= retryDelay then
+                    LastSkillActivation[skillKey] = now
 
-                -- Enum ใช้ระบุหมายเลขสกิลในฟังก์ชันเดิม
-                -- pressSkillKey เรียก Controller โดยตรงอยู่แล้ว
-                if pressSkillKey(keyCodes[slot], worldPosition) then
-                    return
-                end
+                    if pressSkillKey(keyCodes[slot], worldPosition) then
+                        RuntimeFix.NextAutoSkillSlot = (index % #order) + 1
+                        return
+                    end
 
-                if isGameSkillBusy() then
-                    return
+                    if isGameSkillBusy() then
+                        return
+                    end
                 end
             end
         end
@@ -5221,6 +5887,105 @@ end
     end
 
     local function handleRaidState()
+        -- Fate: วาร์ปเข้าจุดเริ่มต่อสู้ครั้งเดียวเมื่อพบมอน
+        if isFateRaid() then
+            local startCharacter = getCharacter()
+            local starting = string.find(
+                string.lower(getRaidStatus()),
+                "starting nightmare", 1, true
+            ) ~= nil
+
+            if starting then
+                if not startCharacter then
+                    return true
+                end
+
+                if RuntimeFix.FateStartCharacter ~= startCharacter
+                    and os.clock() - LastRaidStartTeleport
+                        >= RAID_RETELEPORT_DELAY
+                then
+                    LastRaidStartTeleport = os.clock()
+                    stopHover()
+
+                    local arrived = RuntimeFix.tweenRootTo(
+                        CFrame.new(66, 282, -234),
+                        function()
+                            return isFateRaid()
+                                and getCharacter() == startCharacter
+                                and string.find(
+                                    string.lower(getRaidStatus()),
+                                    "starting nightmare", 1, true
+                                ) ~= nil
+                        end
+                    )
+
+                    if arrived then
+                        RuntimeFix.FateStartCharacter = startCharacter
+                    end
+                end
+
+                return true
+            end
+
+            local character = getCharacter()
+            local root = getCharacterRoot()
+            local humanoid = getHumanoid()
+
+            if not character
+                or not root
+                or not humanoid
+                or humanoid.Health <= 0 then
+                return true
+            end
+
+            if RuntimeFix.FateArenaCharacter == character then
+                return false
+            end
+
+            local enemies = workspace:FindFirstChild("enemies")
+            local foundEnemy = false
+
+            for _, enemy in ipairs(
+                enemies and enemies:GetChildren() or {}
+            ) do
+                if enemy:IsA("Model")
+                    and isEnemyAlive(enemy)
+                    and getEnemyRoot(enemy) then
+
+                    foundEnemy = true
+                    break
+                end
+            end
+
+            if not foundEnemy then return true end
+
+            if AutoFarmSession.Cancelled
+                or not AutoFarmEnabled then
+                return true
+            end
+
+            stopHover()
+
+            local pivotOffset = root.CFrame:ToObjectSpace(
+                character:GetPivot()
+            )
+
+            character:PivotTo(
+                CFrame.new(66, 282, -234)
+                    * root.CFrame.Rotation
+                    * pivotOffset
+            )
+
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+
+            RuntimeFix.FateArenaCharacter = character
+            CurrentAreaName = getLiveFarmArea() or "1"
+
+            -- ปล่อยให้ Auto Farm เลือกและตามมอนต่อทันที
+            return false
+        end
+
         local status = getRaidStatus()
 
         if status == "" then
@@ -5398,6 +6163,1172 @@ end
         if CurrentRubble and CurrentRubble.Parent then
             attackRubble()
         end
+    end
+
+    local SHADOW_ARISE_SCAN_DELAY = 0.5
+    local SHADOW_ARISE_RETRY_DELAY = 3
+    local SHADOW_ARISE_MAX_DISTANCE = 100
+
+    local LastShadowAriseScan = 0
+    local LastAriseDebug = 0
+    local ShadowAriseAttemptAt = setmetatable({}, {
+        __mode = "k",
+    })
+
+    local function tryShadowGateArise()
+        if os.clock() - LastAriseDebug >= 5 then
+            LastAriseDebug = os.clock()
+
+            local folder = workspace:FindFirstChild("AriseShadows")
+            local spots = 0
+            local eligible = 0
+
+            if folder then
+                for _, spot in ipairs(folder:GetChildren()) do
+                    if spot:IsA("BasePart") then
+                        spots += 1
+
+                        local prompt =
+                            spot:FindFirstChildOfClass("ProximityPrompt")
+
+                        if spot:GetAttribute("RaisedBy") == nil
+                            and prompt
+                            and prompt.Enabled
+                        then
+                            eligible += 1
+                        end
+                    end
+                end
+            end
+
+            print(
+                "[AriseDebug]",
+                "Mode:", workspace:GetAttribute("Mode"),
+                "| Raid:", tostring(isInRaid()),
+                "| AutoFarm:", AutoFarmEnabled,
+                "| Slots:", LocalPlayer:GetAttribute("AriseSlots"),
+                "| Shadows:", LocalPlayer:GetAttribute("AriseShadows"),
+                "| Spots:", spots,
+                "| Eligible:", eligible,
+                "| PromptAPI:", typeof(fireproximityprompt)
+            )
+        end
+
+        if AutoFarmSession.Cancelled
+            or not AutoFarmEnabled
+            or not isShadowGateRaid()
+        then
+            return false
+        end
+
+        local now = os.clock()
+
+        if now - LastShadowAriseScan < SHADOW_ARISE_SCAN_DELAY then
+            return false
+        end
+
+        LastShadowAriseScan = now
+
+        local maxSlots = tonumber(
+            LocalPlayer:GetAttribute("AriseSlots")
+        )
+
+        local currentShadows = tonumber(
+            LocalPlayer:GetAttribute("AriseShadows")
+        )
+
+        -- Nil means slot data is unavailable, not necessarily full.
+        -- Let the server validate whether Arise is allowed.
+        if maxSlots ~= nil then
+            if maxSlots <= 0 then
+                return false
+            end
+
+            if currentShadows ~= nil
+                and currentShadows >= maxSlots
+            then
+                return false
+            end
+        end
+
+        local folder = workspace:FindFirstChild("AriseShadows")
+
+        if not folder or not folder:IsA("Folder") then
+            return false
+        end
+
+        local character = getCharacter()
+        local root = getCharacterRoot()
+        local humanoid = getHumanoid()
+
+        if not character
+            or not root
+            or not root.Parent
+            or not humanoid
+            or humanoid.Health <= 0
+        then
+            return false
+        end
+
+        local bestSpot = nil
+        local bestPrompt = nil
+        local bestDistance = math.huge
+
+        for _, spot in ipairs(folder:GetChildren()) do
+            if spot:IsA("BasePart")
+                and spot:GetAttribute("RaisedBy") == nil
+                and now >= (ShadowAriseAttemptAt[spot] or 0)
+            then
+                local prompt =
+                    spot:FindFirstChildOfClass("ProximityPrompt")
+
+                if prompt and prompt.Enabled then
+                    local distance =
+                        (root.Position - spot.Position).Magnitude
+
+                    if distance <= SHADOW_ARISE_MAX_DISTANCE
+                        and distance < bestDistance
+                    then
+                        bestDistance = distance
+                        bestSpot = spot
+                        bestPrompt = prompt
+                    end
+                end
+            end
+        end
+
+        if not bestSpot or not bestPrompt then
+            return false
+        end
+
+        print(
+            "[ShadowGate Arise] Attempt ->",
+            bestSpot:GetFullName(),
+            "| Distance:", math.floor(bestDistance),
+            "| MaxDistance:", bestPrompt.MaxActivationDistance
+        )
+
+        ShadowAriseAttemptAt[bestSpot] =
+            now + SHADOW_ARISE_RETRY_DELAY
+
+        -- Pause combat movement before using Arise.
+        stopHover()
+
+        if bestDistance > math.max(
+            0.5,
+            bestPrompt.MaxActivationDistance - 1
+        ) then
+            local pivotOffset =
+                root.CFrame:ToObjectSpace(character:GetPivot())
+
+            local yOffset = math.min(
+                2,
+                math.max(0, bestPrompt.MaxActivationDistance - 1)
+            )
+
+            local destination =
+                bestSpot.Position + Vector3.new(0, yOffset, 0)
+
+            character:PivotTo(
+                CFrame.new(destination)
+                    * root.CFrame.Rotation
+                    * pivotOffset
+            )
+
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+
+            task.wait(0.1)
+        end
+
+        if AutoFarmSession.Cancelled
+            or not isShadowGateRaid()
+            or not bestPrompt.Parent
+            or not bestPrompt.Enabled
+        then
+            return false
+        end
+
+        local ok, err
+
+        if typeof(fireproximityprompt) == "function" then
+            ok, err = pcall(function()
+                fireproximityprompt(bestPrompt)
+            end)
+        else
+            ok, err = pcall(function()
+                bestPrompt:InputHoldBegin()
+
+                task.wait(
+                    math.max(bestPrompt.HoldDuration, 0.1)
+                )
+
+                bestPrompt:InputHoldEnd()
+            end)
+
+            if not ok then
+                pcall(function()
+                    bestPrompt:InputHoldEnd()
+                end)
+            end
+        end
+
+        if not ok then
+            warn("[ShadowGate Arise] Prompt failed:", err)
+            return true
+        end
+
+        -- Verify Arise without comparing numbers against nil.
+        local confirmed = false
+        local deadline = os.clock() + 1.5
+
+        repeat
+            if AutoFarmSession.Cancelled then
+                break
+            end
+
+            local raisedBy = bestSpot:GetAttribute("RaisedBy")
+
+            local newShadowCount = tonumber(
+                LocalPlayer:GetAttribute("AriseShadows")
+            )
+
+            confirmed =
+                raisedBy == LocalPlayer.UserId
+                or (
+                    currentShadows ~= nil
+                    and newShadowCount ~= nil
+                    and newShadowCount > currentShadows
+                )
+
+            if confirmed then
+                break
+            end
+
+            task.wait(0.1)
+        until os.clock() >= deadline
+
+        if confirmed then
+            print("[ShadowGate Arise] SUCCESS")
+        elseif not AutoFarmSession.Cancelled then
+            warn("[ShadowGate Arise] Not confirmed")
+        end
+
+        return true
+    end
+
+    local function handleRetreatHeal()
+        if AutoFarmSession.Cancelled or not AutoFarmEnabled then
+            return false
+        end
+
+        local toggle = RuntimeFix.FarmOptions.ZeroXRetreatHeal
+        local startOption = RuntimeFix.FarmOptions.ZeroXHealStartPercent
+        local resumeOption = RuntimeFix.FarmOptions.ZeroXHealResumePercent
+
+        local startPercent = tonumber(
+            startOption and startOption.Value
+        ) or HEAL_START_PERCENT
+
+        local resumePercent = tonumber(
+            resumeOption and resumeOption.Value
+        ) or HEAL_RESUME_PERCENT
+
+        local function ResumeCombat()
+            local target = CurrentTarget
+            IsHealing = false
+            stopHover()
+
+            if target and target.Parent
+                and isEnemyAlive(target)
+                and getEnemyRoot(target) then
+                startHover(target)
+            end
+        end
+
+        if not toggle or toggle.Value ~= true then
+            if IsHealing then
+                ResumeCombat()
+            end
+            return false
+        end
+
+        assert(startPercent == startPercent
+            and resumePercent == resumePercent
+            and startPercent >= 1
+            and resumePercent <= 100
+            and startPercent < resumePercent,
+            "Retreat Heal: Retreat Below must be lower than Resume At")
+
+        local humanoid = getHumanoid()
+        local root = getCharacterRoot()
+        local target = CurrentTarget
+
+        if not humanoid
+            or humanoid.Health <= 0
+            or humanoid.MaxHealth <= 0
+            or not root
+            or not root.Parent
+            or not target
+            or not target.Parent
+            or not isEnemyAlive(target)
+            or not getEnemyRoot(target) then
+
+            if IsHealing then
+                IsHealing = false
+                stopHover()
+            end
+            return false
+        end
+
+        -- ใช้เปอร์เซ็นต์จริง ไม่ปัดเศษก่อนเปรียบเทียบ
+        local healthPercent =
+            humanoid.Health / humanoid.MaxHealth * 100
+
+        if IsHealing then
+            if healthPercent >= resumePercent then
+                ResumeCombat()
+                return false
+            end
+
+            -- สร้างตำแหน่งถอยใหม่หากอุปกรณ์พยุงถูกลบ
+            if not HoverConnection
+                or not AlignPosition
+                or not AlignPosition.Parent
+                or not AlignOrientation
+                or not AlignOrientation.Parent then
+
+                if not startHover(target, HEAL_RETREAT_HEIGHT, true) then
+                    IsHealing = false
+                    return false
+                end
+            end
+
+            -- คงพฤติกรรมใช้สกิลระหว่างถอยของระบบเดิม
+            useReadySkillsDuringHeal()
+            return true
+        end
+
+        if healthPercent < startPercent then
+            if startHover(target, HEAL_RETREAT_HEIGHT, true) then
+                IsHealing = true
+                return true
+            end
+        end
+
+        return false
+    end
+
+    --==================================================
+    -- Start Auto Farm
+    --==================================================
+
+    function RuntimeFix.floodStatus(message)
+        -- เก็บสถานะภายใน โดยไม่แสดงใน UI
+        RuntimeFix.FloodMessage = message
+    end
+
+    function RuntimeFix.isFlood()
+        return workspace:GetAttribute("Mode") == "floodescape"
+    end
+
+    function RuntimeFix.floodKey()
+        return tostring(workspace:GetAttribute("FloodFloor")) .. ":"
+            .. tostring(workspace:GetAttribute("FloodRoof")) .. ":"
+            .. tostring(workspace:GetAttribute("FloodPhase"))
+    end
+
+    function RuntimeFix.floodSafe(position)
+        local water = workspace:GetAttribute("FloodLevel")
+
+        if RuntimeFix.isFlood() and type(water) == "number" then
+            return Vector3.new(
+                position.X,
+                math.max(position.Y, water + 8),
+                position.Z
+            )
+        end
+
+        return position
+    end
+
+    function RuntimeFix.floodPoint(object)
+        if not object then return nil end
+
+        if object:IsA("BasePart") then
+            return object.Position
+        elseif object:IsA("Attachment") then
+            return object.WorldPosition
+        elseif object:IsA("Model") then
+            return object:GetPivot().Position
+        end
+
+        return nil
+    end
+
+    function RuntimeFix.floodGatePosition(position, gate)
+        if not gate
+            or not gate.Parent
+            or not gate:IsA("BasePart")
+            or not RuntimeFix.isFlood()
+            or workspace:GetAttribute("FloodPhase") ~= "block" then
+            return position
+        end
+
+        local center = gate.Position
+        local radius = 17 -- เว้นขอบจากรัศมีจริง 18 studs
+        local water = workspace:GetAttribute("FloodLevel")
+        local minY = center.Y - radius
+
+        if type(water) == "number" then
+            minY = math.max(minY, water + 8)
+        end
+
+        if minY > center.Y + radius then
+            return nil
+        end
+
+        local y = math.clamp(
+            position.Y,
+            minY,
+            center.Y + radius
+        )
+
+        local dy = y - center.Y
+        local horizontalLimit = math.sqrt(
+            math.max(0, radius * radius - dy * dy)
+        )
+
+        local offset = Vector3.new(
+            position.X - center.X,
+            0,
+            position.Z - center.Z
+        )
+
+        if offset.Magnitude > horizontalLimit then
+            offset = offset.Unit * horizontalLimit
+        end
+
+        return Vector3.new(
+            center.X + offset.X,
+            y,
+            center.Z + offset.Z
+        )
+    end
+
+    function RuntimeFix.floodHold(position)
+        local root = getCharacterRoot()
+        if not root then return false end
+
+        position = RuntimeFix.floodSafe(position)
+
+        local holding = RuntimeFix.FloodHolding
+
+        if holding
+            and holding.Root == root
+            and HoverConnection
+            and (holding.Position - position).Magnitude < 1 then
+
+            holding.Position = position
+            return true
+        end
+
+        stopHover()
+
+        local key = RuntimeFix.floodKey()
+
+        if (root.Position - position).Magnitude > 3 then
+            local arrived = RuntimeFix.tweenRootTo(
+                CFrame.new(position),
+                function()
+                    return RuntimeFix.isFlood()
+                        and RuntimeFix.floodKey() == key
+                end
+            )
+
+            if not arrived then return false end
+        end
+
+        if not AutoFarmEnabled
+            or AutoFarmSession.Cancelled
+            or not root.Parent
+            or RuntimeFix.floodKey() ~= key then
+            return false
+        end
+
+        holding = {
+            Root = root,
+            Position = position,
+        }
+
+        RuntimeFix.FloodHolding = holding
+
+        RootAttachment = Instance.new("Attachment")
+        RootAttachment.Parent = root
+
+        AlignPosition = Instance.new("AlignPosition")
+        AlignPosition.Mode = Enum.PositionAlignmentMode.OneAttachment
+        AlignPosition.Attachment0 = RootAttachment
+        AlignPosition.MaxForce = math.huge
+        AlignPosition.MaxVelocity = math.huge
+        AlignPosition.Responsiveness = POSITION_RESPONSIVENESS
+        AlignPosition.Position = position
+        AlignPosition.Parent = root
+
+        HoverConnection = RunService.Heartbeat:Connect(function()
+            local humanoid = getHumanoid()
+
+            if AutoFarmSession.Cancelled
+                or not AutoFarmEnabled
+                or RuntimeFix.EndRoundPaused
+                or getCharacterRoot() ~= root
+                or not root.Parent
+                or not humanoid
+                or humanoid.Health <= 0
+                or not RuntimeFix.isFlood()
+                or RuntimeFix.floodKey() ~= key then
+
+                stopHover()
+                return
+            end
+
+            AlignPosition.Position =
+                RuntimeFix.floodSafe(holding.Position)
+
+            root.AssemblyAngularVelocity = Vector3.zero
+        end)
+
+        return true
+    end
+
+    function RuntimeFix.floodLever(map)
+        -- สแกนครั้งแรกเมื่อ Map เปลี่ยน แล้วติดตามของที่เพิ่มใหม่
+        if RuntimeFix.FloodMap ~= map then
+            if RuntimeFix.FloodMapConnection then
+                RuntimeFix.FloodMapConnection:Disconnect()
+                RuntimeFix.FloodMapConnection = nil
+            end
+
+            RuntimeFix.FloodMap = map
+            RuntimeFix.FloodPrompts = {}
+
+            if map then
+                local function add(object)
+                    if object:IsA("ProximityPrompt")
+                        and object.Name == "FloodLeverPrompt" then
+
+                        RuntimeFix.FloodPrompts[object] = true
+                    end
+                end
+
+                for _, object in ipairs(map:GetDescendants()) do
+                    add(object)
+                end
+
+                RuntimeFix.FloodMapConnection =
+                    map.DescendantAdded:Connect(add)
+            end
+        end
+
+        for prompt in pairs(RuntimeFix.FloodPrompts or {}) do
+            if not prompt:IsDescendantOf(map) then
+                RuntimeFix.FloodPrompts[prompt] = nil
+            elseif prompt.Enabled then
+                return prompt
+            end
+        end
+
+        return nil
+    end
+
+    table.insert(AutoFarmSession.Cleanups, function()
+        if RuntimeFix.FloodMapConnection then
+            RuntimeFix.FloodMapConnection:Disconnect()
+            RuntimeFix.FloodMapConnection = nil
+        end
+
+        RuntimeFix.floodStatus("หยุด Auto Farm")
+    end)
+
+    function RuntimeFix.floodStep()
+        local root = getCharacterRoot()
+        local humanoid = getHumanoid()
+
+        if not root or not humanoid or humanoid.Health <= 0 then
+            stopHover()
+            return
+        end
+
+        local floor = workspace:GetAttribute("FloodFloor")
+        local water = workspace:GetAttribute("FloodLevel")
+        local phase = workspace:GetAttribute("FloodPhase")
+        local roof = workspace:GetAttribute("FloodRoof") == true
+
+        if type(floor) ~= "number"
+            or type(water) ~= "number"
+            or (
+                phase ~= "fight"
+                and phase ~= "block"
+                and phase ~= "drain"
+            ) then
+
+            stopHover()
+            RuntimeFix.floodStatus("รอ Flood State จาก Server")
+            return
+        end
+
+        local key = RuntimeFix.floodKey()
+
+        if RuntimeFix.FloodState ~= key then
+            RuntimeFix.FloodCombatGate = nil
+            stopHover()
+            IsHealing = false
+            SkillAimState = nil
+            RuntimeFix.FloodState = key
+        end
+
+        local world = workspace:FindFirstChild("World")
+        local markers = world and world:FindFirstChild("Markers")
+
+        local marker = markers and markers:FindFirstChild(
+            roof and "Roof"
+                or (floor == 0 and "Parking" or "Floor" .. floor)
+        )
+
+        local origin = RuntimeFix.floodPoint(
+            marker and marker:FindFirstChild("Respawn")
+        ) or RuntimeFix.floodPoint(marker)
+
+        if roof and not origin then
+            origin = RuntimeFix.floodPoint(
+                markers and markers:FindFirstChild("BossSpawn")
+            )
+        end
+
+        if floor > 0 and not origin then
+            stopHover()
+            RuntimeFix.floodStatus("รอ Marker ของชั้นปัจจุบัน")
+            return
+        end
+
+        -- พิกัดที่ผู้ใช้ยืนยันสำหรับชั้น 10
+        local floor10ClearPoint = floor == 10 and not roof
+            and Vector3.new(-191, 549, -19) or nil
+
+        local function inFloor10Zone(part)
+            return floor10ClearPoint ~= nil
+                and part ~= nil
+                and math.abs(
+                    part.Position.Y - floor10ClearPoint.Y
+                ) < 30
+        end
+
+        -- ย้ายตามชั้นที่ Server เปิดแล้วเท่านั้น
+        local floorToken = tostring(floor) .. ":" .. tostring(roof)
+
+        if RuntimeFix.FloodFloorToken ~= floorToken then
+            local entryPoint = floor10ClearPoint
+                or (origin and origin + Vector3.new(0, 3, 0))
+
+            if entryPoint
+                and not RuntimeFix.floodHold(entryPoint) then
+                return
+            end
+
+            RuntimeFix.FloodFloorToken = floorToken
+        end
+
+        local label = roof and "Roof" or ("Floor " .. floor)
+
+        local contested =
+            workspace:GetAttribute("FloodGateContested") == true
+
+        -- ตรวจมอนในชั้นปัจจุบันก่อนเข้า Hold Gate
+        local enemies = workspace:FindFirstChild("enemies")
+
+        if not enemies then
+            stopHover()
+            RuntimeFix.floodStatus(label .. " | รอ enemies")
+            return
+        end
+
+        local best, distance
+        local priorityEnemy, priorityDistance
+
+        local gateObjects = world
+            and world:FindFirstChild("MapObjects")
+
+        local activeGate = gateObjects
+            and gateObjects:FindFirstChild("FloodGateZone")
+
+        local gateStage = phase == "block"
+            and not roof
+            and workspace:GetAttribute("FloodLeverAt") == nil
+            and activeGate ~= nil
+            and activeGate:IsA("BasePart")
+
+        local gateBoss, gateBossDistance
+        local gateEnemy, gateEnemyDistance
+
+        for _, enemy in ipairs(enemies:GetChildren()) do
+            local part = getEnemyRoot(enemy)
+
+            if part
+                and isEnemyAlive(enemy)
+                and part.Position.Y > water
+                and (
+                    not origin
+                    or floor == 0
+                    or math.abs(part.Position.Y - origin.Y) < 30
+                    or inFloor10Zone(part)
+                ) then
+
+                local d = (part.Position - root.Position).Magnitude
+
+                if gateStage then
+                    -- ฟังก์ชันเดิมอ่าน enemyStore และ enemiesByName
+                    local _, boss = readFateEnemy(enemy)
+
+                    if boss == true then
+                        if not gateBoss
+                            or enemy == CurrentTarget
+                            or (
+                                gateBoss ~= CurrentTarget
+                                and d < gateBossDistance
+                            ) then
+
+                            gateBoss = enemy
+                            gateBossDistance = d
+                        end
+
+                    elseif boss == false
+                        and (
+                            part.Position - activeGate.Position
+                        ).Magnitude <= 18 then
+
+                        if not gateEnemy
+                            or enemy == CurrentTarget
+                            or (
+                                gateEnemy ~= CurrentTarget
+                                and d < gateEnemyDistance
+                            ) then
+
+                            gateEnemy = enemy
+                            gateEnemyDistance = d
+                        end
+                    end
+                end
+
+                if not distance or d < distance then
+                    best = enemy
+                    distance = d
+                end
+
+                -- เคลียร์มอนระดับล่างก่อน เริ่มจากตัวใกล้พิกัด
+                if inFloor10Zone(part) then
+                    local clearDistance = (
+                        part.Position - floor10ClearPoint
+                    ).Magnitude
+
+                    if not priorityDistance
+                        or clearDistance < priorityDistance then
+
+                        priorityEnemy = enemy
+                        priorityDistance = clearDistance
+                    end
+                end
+            end
+        end
+
+        -- มอนทั่วไปลอยตีภายใน Gate; บอสออกไปไล่ได้
+        if gateStage then
+            if RuntimeFix.floodKey() ~= key then return end
+
+            if gateBoss then
+                RuntimeFix.FloodCombatGate = nil
+
+                if CurrentTarget ~= gateBoss
+                    or RuntimeFix.FloodHolding
+                    or not HoverConnection then
+
+                    if not startHover(gateBoss) then return end
+                end
+
+                if CurrentTarget == gateBoss
+                    and isEnemyAlive(gateBoss) then
+
+                    if not handleRetreatHeal() then
+                        attackEnemy()
+                        useReadySkills()
+                    end
+                end
+
+                return
+            end
+
+            local waitPosition = RuntimeFix.floodGatePosition(
+                RuntimeFix.floodSafe(root.Position),
+                activeGate
+            )
+
+            if not waitPosition then
+                RuntimeFix.FloodCombatGate = nil
+
+                RuntimeFix.floodStatus(
+                    label .. " | Gate ต่ำกว่าระยะปลอดภัยเหนือน้ำ"
+                )
+
+                RuntimeFix.floodHold(root.Position)
+                return
+            end
+
+            local targetRoot = gateEnemy
+                and getEnemyRoot(gateEnemy)
+
+            local currentWater =
+                workspace:GetAttribute("FloodLevel")
+
+            IsHealing = false
+
+            if gateEnemy
+                and gateEnemy.Parent == enemies
+                and targetRoot
+                and isEnemyAlive(gateEnemy)
+                and type(currentWater) == "number"
+                and targetRoot.Position.Y > currentWater
+                and (
+                    targetRoot.Position - activeGate.Position
+                ).Magnitude <= 18 then
+
+                RuntimeFix.FloodCombatGate = activeGate
+
+                if CurrentTarget ~= gateEnemy
+                    or RuntimeFix.FloodHolding
+                    or not HoverConnection then
+
+                    if not startHover(gateEnemy) then return end
+                end
+
+                if RuntimeFix.floodKey() ~= key then return end
+
+                if CurrentTarget == gateEnemy
+                    and isEnemyAlive(gateEnemy) then
+
+                    RuntimeFix.floodStatus(
+                        label .. " | ลอยตีมอนภายใน Gate"
+                    )
+
+                    attackEnemy()
+                    useReadySkills()
+                end
+            else
+                RuntimeFix.FloodCombatGate = nil
+
+                RuntimeFix.floodStatus(
+                    label .. " | Hold Gate: รอมอนเข้ามา"
+                )
+
+                RuntimeFix.floodHold(waitPosition)
+            end
+
+            return
+        end
+
+        -- ชั้น 10: ยืนจุดเดิมตลอดช่วงเคลียร์มอน
+        if floor10ClearPoint
+            and (
+                phase == "fight"
+                or (
+                    phase == "block"
+                    and (best ~= nil or contested)
+                )
+            ) then
+
+            IsHealing = false
+
+            if not RuntimeFix.floodHold(floor10ClearPoint) then
+                return
+            end
+
+            if AutoFarmSession.Cancelled
+                or not AutoFarmEnabled
+                or RuntimeFix.floodKey() ~= key then
+                return
+            end
+
+            local targetRoot = CurrentTarget
+                and getEnemyRoot(CurrentTarget)
+
+            local keepTarget = CurrentTarget ~= nil
+                and CurrentTarget.Parent == enemies
+                and isEnemyAlive(CurrentTarget)
+                and targetRoot ~= nil
+                and targetRoot.Position.Y > water
+                and (
+                    inFloor10Zone(targetRoot)
+                    or (
+                        origin
+                        and math.abs(
+                            targetRoot.Position.Y - origin.Y
+                        ) < 30
+                    )
+                )
+
+            if not keepTarget
+                or (
+                    priorityEnemy
+                    and not inFloor10Zone(targetRoot)
+                ) then
+
+                CurrentTarget = priorityEnemy or best
+            end
+
+            if CurrentTarget then
+                RuntimeFix.floodStatus(
+                    label .. " | ยืนเคลียร์มอนที่ -191, 549, -19"
+                )
+
+                attackEnemy()
+                useReadySkills()
+            else
+                RuntimeFix.floodStatus(
+                    label .. " | ยืนรอมอน / รอ Server เปลี่ยน Phase"
+                )
+            end
+
+            return
+        end
+
+        if phase == "fight"
+            or (
+                phase == "block"
+                and (best ~= nil or contested)
+            )
+            or roof then
+
+            -- เก็บเป้าหมายเดิมไว้ หากยังอยู่ในช่วงความสูงที่ถูกต้อง
+            if CurrentTarget then
+                local part = getEnemyRoot(CurrentTarget)
+
+                if not part
+                    or not isEnemyAlive(CurrentTarget)
+                    or part.Position.Y <= water
+                    or (
+                        origin
+                        and floor ~= 0
+                        and math.abs(part.Position.Y - origin.Y) >= 30
+                        and not inFloor10Zone(part)
+                    ) then
+
+                    stopHover()
+                end
+            end
+
+            -- เปลี่ยนจากมอนระดับบนไปเคลียร์ระดับล่างก่อน
+            if priorityEnemy
+                and CurrentTarget
+                and not inFloor10Zone(
+                    getEnemyRoot(CurrentTarget)
+                ) then
+
+                stopHover()
+            end
+
+            if not CurrentTarget and (priorityEnemy or best) then
+                startHover(priorityEnemy or best)
+            end
+
+            if CurrentTarget then
+                RuntimeFix.floodStatus(
+                    label .. (
+                        priorityEnemy
+                            and " | เคลียร์มอนบริเวณ -191, 549, -19"
+                            or (
+                                phase == "block"
+                                    and " | เคลียร์มอนก่อน Hold Gate"
+                                    or " | ต่อสู้"
+                            )
+                    )
+                )
+
+                if not handleRetreatHeal() then
+                    attackEnemy()
+                    useReadySkills()
+                end
+            else
+                RuntimeFix.floodStatus(
+                    label .. " | รอศัตรู / รอ Server"
+                )
+
+                RuntimeFix.floodHold(
+                    origin and origin + Vector3.new(0, 3, 0)
+                        or root.Position
+                )
+            end
+
+            return
+        end
+
+        if phase == "drain" then
+            RuntimeFix.floodStatus(
+                label .. " | Drain: รอ Server เปิดชั้นถัดไป"
+            )
+
+            RuntimeFix.floodHold(root.Position)
+            return
+        end
+
+        if workspace:GetAttribute("FloodLeverAt") ~= nil then
+            local map = world and world:FindFirstChild("Map")
+            local prompt = RuntimeFix.floodLever(map)
+
+            local position = prompt
+                and RuntimeFix.floodPoint(prompt.Parent)
+
+            if not position then
+                RuntimeFix.floodStatus(
+                    label .. " | รอ Lever ที่ Enabled"
+                )
+
+                RuntimeFix.floodHold(root.Position)
+                return
+            end
+
+            local destination = RuntimeFix.floodSafe(
+                position + Vector3.new(0, 2, 0)
+            )
+
+            if (destination - position).Magnitude
+                >= prompt.MaxActivationDistance then
+
+                RuntimeFix.floodStatus(
+                    label .. " | Lever อยู่ต่ำกว่าระยะปลอดภัยเหนือน้ำ"
+                )
+
+                RuntimeFix.floodHold(root.Position)
+                return
+            end
+
+            RuntimeFix.floodStatus(label .. " | ดึง Lever")
+
+            if not RuntimeFix.floodHold(destination) then
+                return
+            end
+
+            if not prompt.Enabled
+                or RuntimeFix.floodKey() ~= key
+                or workspace:GetAttribute("FloodLeverAt") == nil
+                or (root.Position - position).Magnitude
+                    > prompt.MaxActivationDistance then
+                return
+            end
+
+            if os.clock()
+                < (RuntimeFix.FloodLeverRetryAt or 0) then
+                return
+            end
+
+            RuntimeFix.FloodLeverRetryAt =
+                os.clock() + prompt.HoldDuration + 2
+
+            RuntimeFix.FloodPrompt = prompt
+
+            local usedNativeHold = false
+
+            local ok, err = pcall(function()
+                if not prompt.Parent
+                    or not prompt.Enabled
+                    or AutoFarmSession.Cancelled
+                    or not AutoFarmEnabled
+                    or RuntimeFix.floodKey() ~= key
+                    or workspace:GetAttribute("FloodLeverAt") == nil
+                    or (root.Position - position).Magnitude
+                        > prompt.MaxActivationDistance then
+                    return
+                end
+
+                -- เรียก Lever โดยตรง ไม่ต้องเล็งกล้องหรือกด E
+                if type(fireproximityprompt) == "function" then
+                    fireproximityprompt(prompt)
+                    return
+                end
+
+                -- วิธีเดิม เมื่อ Executor ไม่มี API โดยตรง
+                usedNativeHold = true
+                prompt:InputHoldBegin()
+
+                local deadline =
+                    os.clock() + prompt.HoldDuration + 0.1
+
+                while os.clock() < deadline
+                    and prompt.Parent
+                    and prompt.Enabled
+                    and AutoFarmEnabled
+                    and not AutoFarmSession.Cancelled
+                    and RuntimeFix.floodKey() == key
+                    and workspace:GetAttribute("FloodLeverAt") ~= nil
+                    and (root.Position - position).Magnitude
+                        <= prompt.MaxActivationDistance do
+
+                    task.wait(0.05)
+                end
+            end)
+
+            if usedNativeHold then
+                pcall(function()
+                    prompt:InputHoldEnd()
+                end)
+            end
+
+            RuntimeFix.FloodPrompt = nil
+
+            if not ok then
+                RuntimeFix.floodStatus(
+                    "Lever input failed: " .. tostring(err)
+                )
+            end
+
+            -- รอ Server ลบ FloodLeverAt เพื่อยืนยันผลจริง
+            return
+        end
+
+        local objects = world
+            and world:FindFirstChild("MapObjects")
+
+        local gate = objects
+            and objects:FindFirstChild("FloodGateZone")
+
+        if not gate or not gate:IsA("BasePart") then
+            RuntimeFix.floodStatus(label .. " | รอ GateZone")
+            RuntimeFix.floodHold(root.Position)
+            return
+        end
+
+        local destination = RuntimeFix.floodSafe(gate.Position)
+
+        -- GateRadius = 18 ตามรายงาน เว้นขอบไว้ 1 stud
+        if (destination - gate.Position).Magnitude > 17 then
+            RuntimeFix.floodStatus(
+                label .. " | Gate อยู่ต่ำกว่าระยะปลอดภัยเหนือน้ำ"
+            )
+
+            RuntimeFix.floodHold(root.Position)
+            return
+        end
+
+        local progress = tonumber(
+            workspace:GetAttribute("FloodGate")
+        ) or 0
+
+        RuntimeFix.floodStatus(
+            ("%s | Hold Gate %.0f%% | Crowd %s"):format(
+                label,
+                math.clamp(progress, 0, 1) * 100,
+                tostring(workspace:GetAttribute("FloodGateCrowd"))
+            )
+        )
+
+        RuntimeFix.floodHold(destination)
     end
 
     --==================================================
@@ -6891,6 +8822,10 @@ end
         end
 
         if RuntimeFix.trialsEvolutionComplete(data) then
+            if not RuntimeFix.isSolarEvolutionReady(data) then
+                return nil
+            end
+
             return RuntimeFix.getAccessoryCollectionPlan(data).Ready
         end
 
@@ -7454,7 +9389,16 @@ end
                     end
                 end
 
-                local target = RuntimeFix.runtimeMaterialTarget(missing, 4)
+                local target = RuntimeFix.runtimeMaterialTarget(
+                    missing,
+                    4,
+                    recipe.Character == "cha_hae_in"
+                        and {
+                            hxh = true,
+                            fateraid = true,
+                        }
+                        or nil
+                )
 
                 -- เมื่อของครบแล้ว แต่เงิน/เพชรยังขาด:
                 -- ใช้ Shadow Gate ตามแหล่งฟาร์มเงิน/เพชรเดิม
@@ -7881,6 +9825,7 @@ end
             frieren = true,
             rin = true,
             ye_shunguang = true,
+            cha_hae_in = true,
         }
 
         local lowestSlot = nil
@@ -7937,6 +9882,7 @@ end
         RuntimeFix.runtimeEvolution("rin", "Inferno Prince"),
         RuntimeFix.runtimeEvolution("frieren", "Silver Calamity"),
         RuntimeFix.runtimeEvolution("ye_shunguang", "Void Arbiter"),
+        RuntimeFix.runtimeEvolution("cha_hae_in", "Solar Radiance"),
     }
 
     function RuntimeFix.getTrialsEvolutionPlan(data)
@@ -7964,8 +9910,10 @@ end
         -- ลำดับนี้บังคับ Rin ก่อน Frieren
         for _, recipe in ipairs(RuntimeFix.TrialsEvolutionRecipes) do
             -- Ye ต้องรับจาก Storage เข้า Inventory ก่อน Evo
-            if recipe.Character == "ye_shunguang"
-                and not RuntimeFix.findOwnedSlot(data, "ye_shunguang")
+            if (
+                recipe.Character == "ye_shunguang"
+                or recipe.Character == "cha_hae_in"
+            ) and not RuntimeFix.findOwnedSlot(data, recipe.Character)
             then
                 continue
             end
@@ -8080,6 +10028,177 @@ end
         return true
     end
 
+RuntimeFix.SolarTarget = {
+    Character = "cha_hae_in",
+    Name = "Solar Radiance",
+    Mode = "fateraid",
+    QueueMap = "Fate",
+}
+
+function RuntimeFix.getSolarStatus(data)
+    assert(
+        type(data) == "table"
+            and type(data.UnlockedCharacters) == "table"
+            and type(data.achievements) == "table"
+            and type(data.achievements.progress) == "table",
+        "Solar Radiance account data unavailable"
+    )
+
+    local character = RuntimeFix.SolarTarget.Character
+    local slot = RuntimeFix.findOwnedSlot(data, character)
+    local stored = RuntimeFix.storageCount(data, character)
+    local pending = RuntimeFix.StoredPending
+
+    if pending and pending.character == character then
+        local target = data.UnlockedCharacters[
+            "Slot" .. tostring(pending.slot)
+        ]
+
+        local confirmed =
+            type(target) == "table"
+            and target.Unlocked == true
+            and target.Character == character
+            and stored < pending.beforeCount
+
+        if not confirmed then
+            return "placing", slot
+        end
+    end
+
+    if slot then
+        return "owned", slot
+    end
+
+    if stored > 0 then
+        return "stored", nil
+    end
+
+    return "missing", nil
+end
+
+function RuntimeFix.isSolarInventoryReady(data)
+    return RuntimeFix.getSolarStatus(data) == "owned"
+end
+
+function RuntimeFix.isSolarEvolutionReady(data)
+    if not RuntimeFix.isSolarInventoryReady(data) then
+        return false
+    end
+
+    local entry = type(data.CharactersData) == "table"
+        and data.CharactersData.cha_hae_in
+
+    return type(entry) == "table"
+        and entry.IsUltimateUnlocked == true
+end
+
+function RuntimeFix.getSolarFarmStage(data)
+    local status = RuntimeFix.getSolarStatus(data)
+
+    if status == "owned" then
+        return nil, nil
+    end
+
+    if status == "stored" or status == "placing" then
+        return nil,
+            "Solar Radiance -> Lobby for Storage confirmation"
+    end
+
+    return {
+        Map = RuntimeFix.SolarTarget.Mode,
+        Chapter = 0,
+        Difficulty = 4,
+    }, "Find Solar Radiance in Fate Raid"
+end
+
+function RuntimeFix.runSolarRadiance()
+    if AutoFarmSession.Cancelled
+        or game.PlaceId ~= AUTO_JOIN_PLACE_ID
+    then
+        return false
+    end
+
+    local data = RuntimeFix.readAccount()
+
+    if not data or not RuntimeFix.trialsEvolutionComplete(data) then
+        return false
+    end
+
+    local status = RuntimeFix.getSolarStatus(data)
+    RuntimeFix.SolarStatus = status
+
+    if status == "owned" then
+        return true
+    end
+
+    if status == "stored" or status == "placing" then
+        RuntimeFix.monarchClearQueue()
+        return false
+    end
+
+    if RuntimeFix.StoredPending or RuntimeFix.Crafting then
+        return false
+    end
+
+    local queueKey = "SolarRadiance_Fate"
+
+    if ActiveLobbyQueue == queueKey
+        and LastLobbyJoinAttemptClock > 0
+        and os.clock() - LastLobbyJoinAttemptClock
+            < LOBBY_JOIN_TIMEOUT_SECONDS
+    then
+        return true
+    end
+
+    local retrying = ActiveLobbyQueue == queueKey
+
+    if not RuntimeFix.monarchClearQueue() then
+        return false
+    end
+
+    if retrying then
+        cycleNextRoomNumber()
+    end
+
+    RuntimeFix.TrialsEvolution.ActiveForEvo = nil
+
+    if not prepareTeam() then
+        return false
+    end
+
+    if AutoFarmSession.Cancelled
+        or not queueScriptOnTeleport()
+    then
+        return false
+    end
+
+    local fresh = RuntimeFix.readAccount()
+
+    if AutoFarmSession.Cancelled
+        or not fresh
+        or not RuntimeFix.trialsEvolutionComplete(fresh)
+        or RuntimeFix.getSolarStatus(fresh) ~= "missing"
+        or RuntimeFix.StoredPending
+    then
+        return false
+    end
+
+    ActiveLobbyQueue = queueKey
+    LastLobbyJoinAttemptClock = os.clock()
+    LastLobbyJoinAction = RuntimeFix.runMonarch
+
+    return RuntimeFix.createQueue({
+        gamemode = "Raid",
+        map = RuntimeFix.SolarTarget.QueueMap,
+        chapter = 0,
+        floor = 0,
+        difficulty = 4,
+        maxPlayers = 1,
+        friendsOnly = false,
+        roomNumber = CurrentLobbyRoomNumber,
+    })
+end
+
     function RuntimeFix.runCompletedShadowGate()
         if AutoFarmSession.Cancelled
             or game.PlaceId ~= AUTO_JOIN_PLACE_ID
@@ -8090,6 +10209,14 @@ end
         local data = RuntimeFix.readAccount()
         if not RuntimeFix.trialsEvolutionComplete(data) then
             return false
+        end
+
+        if not RuntimeFix.isSolarInventoryReady(data) then
+            return RuntimeFix.runSolarRadiance()
+        end
+
+        if not RuntimeFix.isSolarEvolutionReady(data) then
+            return RuntimeFix.runTrialsEvolution()
         end
 
         local plan = RuntimeFix.getAccessoryCollectionPlan(data)
@@ -8143,6 +10270,10 @@ end
         if AutoFarmSession.Cancelled or not RuntimeFix.trialsEvolutionComplete(fresh) then
             return false
         end
+        if not RuntimeFix.isSolarEvolutionReady(fresh) then
+            return false
+        end
+
         local updated = RuntimeFix.getAccessoryCollectionPlan(fresh)
         local freshTarget = updated.Target or {
             Map = "sololevelingraid", Chapter = 1, Difficulty = 4,
@@ -8337,8 +10468,8 @@ end
             gamemode = isStory and "Story" or "Raid",
             map = isStory and "Hxh"
                     or (
-                        target.Map == "spiritedawayraid"
-                        and "BathTub"
+                        target.Map == "fateraid" and "Fate"
+                        or target.Map == "spiritedawayraid" and "BathTub"
                         or "ShadowGate"
                     ),
             chapter = isStory and target.Chapter or 0,
@@ -9272,9 +11403,25 @@ end
                 error(readError)
             end
 
-            if game.PlaceId == AUTO_JOIN_PLACE_ID
-                and RuntimeFix.trialsEvolutionComplete(data)
+            if RuntimeFix.trialsEvolutionComplete(data)
+                and (
+                    game.PlaceId == AUTO_JOIN_PLACE_ID
+                    or workspace:GetAttribute("Mode") == "fateraid"
+                )
             then
+                local active = RuntimeFix.TrialsEvolution.ActiveForEvo
+
+                if active then
+                    return RuntimeFix.equipPostMonarchActive(active)
+                end
+
+                if workspace:GetAttribute("Mode") == "fateraid"
+                    or RuntimeFix.getSolarStatus(data) == "missing"
+                    or not RuntimeFix.isSolarEvolutionReady(data)
+                then
+                    return RuntimeFix.equipPostMonarchActive("sung_jinwoo")
+                end
+
                 return true
             end
 
@@ -9768,261 +11915,127 @@ end
     -- Shadow Gate Auto Arise
     --==================================================
 
-    local SHADOW_ARISE_SCAN_DELAY = 0.5
-    local SHADOW_ARISE_RETRY_DELAY = 3
-    local SHADOW_ARISE_MAX_DISTANCE = 100
+function RuntimeFix.rememberFarmCharacter(character)
+    if not character then
+        return
+    end
 
-    local LastShadowAriseScan = 0
-    local LastAriseDebug = 0
-    local ShadowAriseAttemptAt = setmetatable({}, {
-        __mode = "k",
-    })
+    if RuntimeFix.FarmObservedCharacter == character then
+        return
+    end
 
-    local function tryShadowGateArise()
-        if os.clock() - LastAriseDebug >= 5 then
-            LastAriseDebug = os.clock()
+    if RuntimeFix.FarmCharacterAddedConnection then
+        RuntimeFix.FarmCharacterAddedConnection:Disconnect()
+    end
 
-            local folder = workspace:FindFirstChild("AriseShadows")
-            local spots = 0
-            local eligible = 0
+    RuntimeFix.FarmObservedCharacter = character
 
-            if folder then
-                for _, spot in ipairs(folder:GetChildren()) do
-                    if spot:IsA("BasePart") then
-                        spots += 1
+    RuntimeFix.FarmCollisionSaved =
+        RuntimeFix.FarmCollisionSaved
+        or setmetatable({}, { __mode = "k" })
 
-                        local prompt =
-                            spot:FindFirstChildOfClass("ProximityPrompt")
+    RuntimeFix.FarmAutoRotateSaved =
+        RuntimeFix.FarmAutoRotateSaved
+        or setmetatable({}, { __mode = "k" })
 
-                        if spot:GetAttribute("RaisedBy") == nil
-                            and prompt
-                            and prompt.Enabled
-                        then
-                            eligible += 1
-                        end
-                    end
-                end
-            end
-
-            print(
-                "[AriseDebug]",
-                "Mode:", workspace:GetAttribute("Mode"),
-                "| Raid:", tostring(isInRaid()),
-                "| AutoFarm:", AutoFarmEnabled,
-                "| Slots:", LocalPlayer:GetAttribute("AriseSlots"),
-                "| Shadows:", LocalPlayer:GetAttribute("AriseShadows"),
-                "| Spots:", spots,
-                "| Eligible:", eligible,
-                "| PromptAPI:", typeof(fireproximityprompt)
-            )
-        end
-
-        if AutoFarmSession.Cancelled
-            or not AutoFarmEnabled
-            or not isShadowGateRaid()
+    local function remember(object)
+        if object:IsA("BasePart")
+            and RuntimeFix.FarmCollisionSaved[object] == nil
         then
-            return false
+            RuntimeFix.FarmCollisionSaved[object] =
+                object.CanCollide
+
+        elseif object:IsA("Humanoid")
+            and RuntimeFix.FarmAutoRotateSaved[object] == nil
+        then
+            RuntimeFix.FarmAutoRotateSaved[object] =
+                object.AutoRotate
         end
+    end
 
-        local now = os.clock()
+    RuntimeFix.FarmCharacterAddedConnection =
+        character.DescendantAdded:Connect(remember)
 
-        if now - LastShadowAriseScan < SHADOW_ARISE_SCAN_DELAY then
-            return false
+    for _, object in ipairs(character:GetDescendants()) do
+        remember(object)
+    end
+end
+
+function RuntimeFix.spawnFarmTask(callback)
+    task.spawn(function()
+        local ok, failure = xpcall(callback, function(problem)
+            return debug.traceback(tostring(problem), 2)
+        end)
+
+        if not ok and not AutoFarmSession.Cancelled then
+            RuntimeFix.FarmLastError = failure
+            AutoFarmEnabled = false
+
+            stopHover()
+            resetRubbleState()
         end
+    end)
+end
 
-        LastShadowAriseScan = now
+table.insert(AutoFarmSession.Cleanups, function()
+    if RuntimeFix.FarmCharacterAddedConnection then
+        RuntimeFix.FarmCharacterAddedConnection:Disconnect()
+        RuntimeFix.FarmCharacterAddedConnection = nil
+    end
 
-        local maxSlots = tonumber(
-            LocalPlayer:GetAttribute("AriseSlots")
-        )
+    RuntimeFix.FarmObservedCharacter = nil
 
-        local currentShadows = tonumber(
-            LocalPlayer:GetAttribute("AriseShadows")
-        )
+    for part, original in pairs(
+        RuntimeFix.FarmCollisionSaved or {}
+    ) do
+        if part.Parent then
+            part.CanCollide = original
+        end
+    end
 
-        -- Nil means slot data is unavailable, not necessarily full.
-        -- Let the server validate whether Arise is allowed.
-        if maxSlots ~= nil then
-            if maxSlots <= 0 then
+    for humanoid, original in pairs(
+        RuntimeFix.FarmAutoRotateSaved or {}
+    ) do
+        if humanoid.Parent then
+            humanoid.AutoRotate = original
+        end
+    end
+
+    RuntimeFix.FarmCollisionSaved = nil
+    RuntimeFix.FarmAutoRotateSaved = nil
+end)
+
+        function RuntimeFix.resolveFarmGameplay()
+            local roundHUD = PlayerGui:FindFirstChild("RoundHUD")
+            local container = roundHUD and roundHUD:FindFirstChild("Container")
+            local top = container and container:FindFirstChild("TopPart")
+            local remaining = top and top:FindFirstChild("RemainingFrame")
+            local label = remaining and remaining:FindFirstChild("EnemyCount")
+
+            local hud = PlayerGui:FindFirstChild("HUD")
+            local hudRoot = hud and hud:FindFirstChild("HUD")
+            local bottom = hudRoot and hudRoot:FindFirstChild("BottomLeftHolder")
+            local main = bottom and bottom:FindFirstChild("main")
+
+            local world = workspace:FindFirstChild("World")
+            local areas = world and world:FindFirstChild("Areas")
+            local map = world and world:FindFirstChild("Map")
+            local remote = ReplicatedStorage:FindFirstChild("performM1")
+
+            if not label or not label:IsA("TextLabel")
+                or not areas or not map
+                or not remote or not remote:IsA("RemoteEvent") then
                 return false
             end
 
-            if currentShadows ~= nil
-                and currentShadows >= maxSlots
-            then
-                return false
-            end
-        end
-
-        local folder = workspace:FindFirstChild("AriseShadows")
-
-        if not folder or not folder:IsA("Folder") then
-            return false
-        end
-
-        local character = getCharacter()
-        local root = getCharacterRoot()
-        local humanoid = getHumanoid()
-
-        if not character
-            or not root
-            or not root.Parent
-            or not humanoid
-            or humanoid.Health <= 0
-        then
-            return false
-        end
-
-        local bestSpot = nil
-        local bestPrompt = nil
-        local bestDistance = math.huge
-
-        for _, spot in ipairs(folder:GetChildren()) do
-            if spot:IsA("BasePart")
-                and spot:GetAttribute("RaisedBy") == nil
-                and now >= (ShadowAriseAttemptAt[spot] or 0)
-            then
-                local prompt =
-                    spot:FindFirstChildOfClass("ProximityPrompt")
-
-                if prompt and prompt.Enabled then
-                    local distance =
-                        (root.Position - spot.Position).Magnitude
-
-                    if distance <= SHADOW_ARISE_MAX_DISTANCE
-                        and distance < bestDistance
-                    then
-                        bestDistance = distance
-                        bestSpot = spot
-                        bestPrompt = prompt
-                    end
-                end
-            end
-        end
-
-        if not bestSpot or not bestPrompt then
-            return false
-        end
-
-        print(
-            "[ShadowGate Arise] Attempt ->",
-            bestSpot:GetFullName(),
-            "| Distance:", math.floor(bestDistance),
-            "| MaxDistance:", bestPrompt.MaxActivationDistance
-        )
-
-        ShadowAriseAttemptAt[bestSpot] =
-            now + SHADOW_ARISE_RETRY_DELAY
-
-        -- Pause combat movement before using Arise.
-        stopHover()
-
-        if bestDistance > math.max(
-            0.5,
-            bestPrompt.MaxActivationDistance - 1
-        ) then
-            local pivotOffset =
-                root.CFrame:ToObjectSpace(character:GetPivot())
-
-            local yOffset = math.min(
-                2,
-                math.max(0, bestPrompt.MaxActivationDistance - 1)
-            )
-
-            local destination =
-                bestSpot.Position + Vector3.new(0, yOffset, 0)
-
-            character:PivotTo(
-                CFrame.new(destination)
-                    * root.CFrame.Rotation
-                    * pivotOffset
-            )
-
-            root.AssemblyLinearVelocity = Vector3.zero
-            root.AssemblyAngularVelocity = Vector3.zero
-
-            task.wait(0.1)
-        end
-
-        if AutoFarmSession.Cancelled
-            or not isShadowGateRaid()
-            or not bestPrompt.Parent
-            or not bestPrompt.Enabled
-        then
-            return false
-        end
-
-        local ok, err
-
-        if typeof(fireproximityprompt) == "function" then
-            ok, err = pcall(function()
-                fireproximityprompt(bestPrompt)
-            end)
-        else
-            ok, err = pcall(function()
-                bestPrompt:InputHoldBegin()
-
-                task.wait(
-                    math.max(bestPrompt.HoldDuration, 0.1)
-                )
-
-                bestPrompt:InputHoldEnd()
-            end)
-
-            if not ok then
-                pcall(function()
-                    bestPrompt:InputHoldEnd()
-                end)
-            end
-        end
-
-        if not ok then
-            warn("[ShadowGate Arise] Prompt failed:", err)
+            EnemyCountLabel = label
+            SkillsFolder = main and main:FindFirstChild("skills")
+            AreasFolder = areas
+            MapFolder = map
+            PerformM1 = remote
             return true
         end
 
-        -- Verify Arise without comparing numbers against nil.
-        local confirmed = false
-        local deadline = os.clock() + 1.5
-
-        repeat
-            if AutoFarmSession.Cancelled then
-                break
-            end
-
-            local raisedBy = bestSpot:GetAttribute("RaisedBy")
-
-            local newShadowCount = tonumber(
-                LocalPlayer:GetAttribute("AriseShadows")
-            )
-
-            confirmed =
-                raisedBy == LocalPlayer.UserId
-                or (
-                    currentShadows ~= nil
-                    and newShadowCount ~= nil
-                    and newShadowCount > currentShadows
-                )
-
-            if confirmed then
-                break
-            end
-
-            task.wait(0.1)
-        until os.clock() >= deadline
-
-        if confirmed then
-            print("[ShadowGate Arise] SUCCESS")
-        elseif not AutoFarmSession.Cancelled then
-            warn("[ShadowGate Arise] Not confirmed")
-        end
-
-        return true
-    end
-
-    --==================================================
-    -- Start Auto Farm
-    --==================================================
 
     local function StartAutoFarm()
         if AutoFarmEnabled then
@@ -10032,6 +12045,12 @@ end
         AutoFarmEnabled = true
 
         local noclipConnection = nil
+        table.insert(AutoFarmSession.Cleanups, function()
+            if noclipConnection then
+                noclipConnection:Disconnect()
+                noclipConnection = nil
+            end
+        end)
         noclipConnection = RunService.Stepped:Connect(function()
             if not AutoFarmEnabled or AutoFarmSession.Cancelled then
                 if noclipConnection then
@@ -10041,6 +12060,32 @@ end
                 return
             end
             local char = getCharacter()
+
+            -- ตรวจน้ำระหว่างเดินทางด้วย ไม่ใช่เฉพาะปลายทาง
+            if RuntimeFix.isFlood()
+                and not RuntimeFix.EndRoundPaused
+                and PlayerGui:GetAttribute("EndScreenActive") ~= true then
+
+                local root = getCharacterRoot()
+                local humanoid = getHumanoid()
+
+                if root and humanoid and humanoid.Health > 0 then
+                    local safe = RuntimeFix.floodSafe(root.Position)
+
+                    if safe.Y > root.Position.Y then
+                        if RuntimeFix.RootTweenCleanup then
+                            RuntimeFix.RootTweenCleanup()
+                        end
+
+                        root.CFrame =
+                            CFrame.new(safe) * root.CFrame.Rotation
+
+                        root.AssemblyLinearVelocity = Vector3.zero
+                    end
+                end
+            end
+
+            RuntimeFix.rememberFarmCharacter(char)
             if char then
                 local waiting = RuntimeFix.WaitingStand
 
@@ -10055,20 +12100,43 @@ end
                 end
             end
         end)
-        task.spawn(function()
+        RuntimeFix.spawnFarmTask(function()
             while AutoFarmEnabled
                 and not AutoFarmSession.Cancelled
             do
+                if not RuntimeFix.resolveFarmGameplay() then
+                    stopHover()
+                    task.wait(0.5)
+                    continue
+                end
+
                 local endScreen = PlayerGui:FindFirstChild("EndScreen")
 
                 if RuntimeFix.EndRoundPaused
+                    or PlayerGui:GetAttribute("EndScreenActive") == true
                     or (
                         endScreen
                         and endScreen:IsA("ScreenGui")
                         and endScreen.Enabled
-                    )
-                then
+                    ) then
+
+                    stopHover()
+                    resetRubbleState()
+                    RuntimeFix.FateArenaCharacter = nil
+                    RuntimeFix.FateStartCharacter = nil
+
+                    IsHealing = false
+                    SkillAimState = nil
+                    CurrentAreaName = nil
+                    LastTeleportedArea = nil
+
                     task.wait(0.2)
+                    continue
+                end
+
+                if RuntimeFix.isFlood() then
+                    RuntimeFix.floodStep()
+                    task.wait(0.15)
                     continue
                 end
 
@@ -10077,31 +12145,8 @@ end
                     continue
                 end
 
-                if IsHealing then
-                    local healingTarget = CurrentTarget
-
-                    updateRetreatHeal()
-
-                    -- ยิงเช็ก Skill ทุก Tick ระหว่าง Retreat Heal
-                    if healingTarget
-                        and isEnemyAlive(healingTarget)
-                    then
-                        CurrentTarget = healingTarget
-                        useReadySkillsDuringHeal()
-                    end
-
-                    task.wait(0.05)
-                    continue
-                end
-
-                local healthPercent = getHealthPercent()
-
-                if healthPercent < HEAL_START_PERCENT
-                    and CurrentTarget
-                    and isEnemyAlive(CurrentTarget)
-                then
-                    startRetreatHeal()
-                    task.wait(0.10)
+                if handleRetreatHeal() then
+                    task.wait(0.1)
                     continue
                 end
 
@@ -10255,16 +12300,34 @@ end
                     local needSwitchFromBoss = false
 
                     if CurrentTarget and isEnemyAlive(CurrentTarget) then
-                        if isShadowGateRaid() then
+                        if isFateRaid() then
+                            local key, boss = readFateEnemy(CurrentTarget)
+
+                            if not key then
+                                needSwitchFromBoss = true
+
+                            elseif boss then
+                                needSwitchFromBoss =
+                                    isRaidBossGuarded()
+                                    or hasMinionsAliveInArea(CurrentAreaName)
+
+                            elseif isRaidBossGuarded()
+                                and key ~= "fateOath" then
+
+                                local priority =
+                                    getNearestEnemyInArea(CurrentAreaName)
+
+                                needSwitchFromBoss = priority ~= nil
+                                    and readFateEnemy(priority) == "fateOath"
+                            end
+
+                        elseif isShadowGateRaid() then
                             if isShadowGateMainBoss(CurrentTarget) then
                                 needSwitchFromBoss =
-                                    workspace:GetAttribute("RaidBossGuarded") == true
-                                    or (
-                                        tonumber(workspace:GetAttribute("RaidOathCount"))
-                                        or 0
-                                    ) > 0
+                                    isRaidBossGuarded()
                                     or hasMinionsAliveInArea(CurrentAreaName)
                             end
+
                         elseif isEnemyBoss(CurrentTarget) then
                             needSwitchFromBoss =
                                 hasMinionsAliveInArea(CurrentAreaName)
@@ -10288,14 +12351,14 @@ end
 
                             -- startHover เรียก stopHover เพื่อปลดจุดรอก่อน Orbit
                             if not startHover(enemy) then
-                                if isShadowGateRaid() then
+                                if isShadowGateRaid() or isFateRaid() then
                                     stopHover()
                                 else
                                     holdStillWhileWaiting(CurrentAreaName)
                                 end
                             end
                         else
-                            if isShadowGateRaid() then
+                            if isShadowGateRaid() or isFateRaid() then
                                 stopHover()
                             else
                                 holdStillWhileWaiting(CurrentAreaName)
@@ -10599,7 +12662,7 @@ end
         return unitStorage:IsA("ScreenGui") and unitStorage.Enabled
     end
 
-    local function findLowestRaritySlot(): (number?, string?)
+    function RuntimeFix.findLowestRaritySlot(): (number?, string?)
         local data = RuntimeFix.readAccount()
         local unlocked = data and data.UnlockedCharacters
 
@@ -10617,6 +12680,7 @@ end
             frieren = true,
             rin = true,
             ye_shunguang = true,
+            cha_hae_in = true,
         }
 
         -- เลือกช่องแรกที่ปลดล็อกและแทนที่ได้
@@ -10637,7 +12701,7 @@ end
         return nil, nil
     end
 
-    local function handleUnitStorageAutoReplace(): boolean
+    function RuntimeFix.handleUnitStorageAutoReplace(): boolean
         if AutoFarmSession.Cancelled
             or game.PlaceId ~= AUTO_JOIN_PLACE_ID
         then
@@ -10651,8 +12715,10 @@ end
         end
 
         -- Evo ครบแล้ว ไม่ให้การรอรับตัวจาก Storage บล็อก Auto Join
-        if RuntimeFix.trialsEvolutionComplete(data) then
-            RuntimeFix.StoredPending = nil
+        if RuntimeFix.trialsEvolutionComplete(data)
+            and RuntimeFix.isSolarInventoryReady(data)
+            and not RuntimeFix.StoredPending
+        then
             return true
         end
 
@@ -10720,7 +12786,12 @@ end
 
         local character = nil
 
-        if RuntimeFix.storageCount(data, "sung_jinwoo") > 0
+        if RuntimeFix.trialsEvolutionComplete(data)
+            and RuntimeFix.getSolarStatus(data) == "stored"
+        then
+            character = RuntimeFix.SolarTarget.Character
+
+        elseif RuntimeFix.storageCount(data, "sung_jinwoo") > 0
             and not RuntimeFix.findOwnedSlot(data, "sung_jinwoo")
         then
             character = "sung_jinwoo"
@@ -10748,6 +12819,15 @@ end
             return false
         end
 
+        local isSolarCharacter =
+            character == RuntimeFix.SolarTarget.Character
+
+        if isSolarCharacter
+            and not RuntimeFix.monarchClearQueue()
+        then
+            return false
+        end
+
         local isTrialsCharacter =
             character == "frieren"
             or character == "rin"
@@ -10758,7 +12838,7 @@ end
         if isTrialsCharacter then
             targetSlot = RuntimeFix.selectTrialsSlot(data)
         else
-            targetSlot = findLowestRaritySlot()
+            targetSlot = RuntimeFix.findLowestRaritySlot()
         end
 
         if not targetSlot then
@@ -10796,6 +12876,7 @@ end
             hutao = true,
             sung_jinwoo = true,
             ye_shunguang = true,
+            cha_hae_in = true,
         }
 
         if isTrialsCharacter then
@@ -10805,6 +12886,7 @@ end
                 frieren = true,
                 rin = true,
                 ye_shunguang = true,
+                cha_hae_in = true,
             }
 
             -- ตรวจช่อง Rarity ต่ำสุดใหม่ก่อนส่งคำขอ
@@ -10834,9 +12916,20 @@ end
         RuntimeFix.StoredRequestId =
             RuntimeFix.StoredRequestId % 65535 + 1
 
+        local packetSlot =
+            isSolarCharacter
+            and ("Slot" .. tostring(targetSlot))
+            or targetSlot
+
         RuntimeFix.StoredPending = {
             character = character,
+
+            -- ใช้ตัวเลขสำหรับตรวจ Account ภายใน
             slot = targetSlot,
+
+            -- ใช้ค่าตาม Schema สำหรับส่ง Packet
+            packetSlot = packetSlot,
+
             requestId = RuntimeFix.StoredRequestId,
             beforeCount = beforeCount,
             deadline = os.clock() + 10,
@@ -10846,7 +12939,7 @@ end
 
         packets.placeStoredUnit:fire({
             character = character,
-            slot = targetSlot,
+            slot = packetSlot,
             requestId = RuntimeFix.StoredRequestId,
         })
 
@@ -10897,7 +12990,10 @@ end
                             if pending
                                 and result.requestId == pending.requestId
                                 and result.character == pending.character
-                                and result.slot == pending.slot
+                                and (
+                                    result.slot == pending.slot
+                                    or result.slot == pending.packetSlot
+                                )
                             then
                                 pending.response = result
                             end
@@ -10924,7 +13020,7 @@ end
 
             while listenerReady and not AutoFarmSession.Cancelled do
                 local ok, handlerError =
-                    pcall(handleUnitStorageAutoReplace)
+                    pcall(RuntimeFix.handleUnitStorageAutoReplace)
 
                 if not ok then
                     warn("[UnitStorage] Handler failed:", handlerError)
@@ -11095,9 +13191,9 @@ end
         return true
     end
 
-    local HutaoEvolveTriggered = false
-    local HutaoEvoFarmStarted = false
-    local HutaoEvolveRetryAt = 0
+    RuntimeFix.HutaoEvolveTriggered = false
+    RuntimeFix.HutaoEvoFarmStarted = false
+    RuntimeFix.HutaoEvolveRetryAt = 0
 
     function getHutaoEvoStatus()
         local data = RuntimeFix.readAccount()
@@ -11202,11 +13298,11 @@ end
             return true
         end
 
-        if HutaoEvolveTriggered
+        if RuntimeFix.HutaoEvolveTriggered
             or RuntimeFix.PreparingTeam
             or RuntimeFix.Crafting
             or RuntimeFix.StoredPending
-            or os.clock() < HutaoEvolveRetryAt
+            or os.clock() < RuntimeFix.HutaoEvolveRetryAt
         then
             return false
         end
@@ -11217,7 +13313,7 @@ end
             return false
         end
 
-        HutaoEvolveTriggered = true
+        RuntimeFix.HutaoEvolveTriggered = true
         RuntimeFix.PreparingTeam = true
 
         local ok, confirmed = pcall(function()
@@ -11286,15 +13382,15 @@ end
         end)
 
         RuntimeFix.PreparingTeam = false
-        HutaoEvolveTriggered = false
+        RuntimeFix.HutaoEvolveTriggered = false
 
         if ok and confirmed then
-            HutaoEvolveRetryAt = 0
+            RuntimeFix.HutaoEvolveRetryAt = 0
             print("[AutoEvoHutao] Evolution CONFIRMED")
             return true
         end
 
-        HutaoEvolveRetryAt = os.clock() + 5
+        RuntimeFix.HutaoEvolveRetryAt = os.clock() + 5
 
         if not ok then
             warn("[AutoEvoHutao] Action failed:", confirmed)
@@ -11312,8 +13408,8 @@ end
             return true
         end
 
-        if HutaoEvolveTriggered
-            or os.clock() < HutaoEvolveRetryAt
+        if RuntimeFix.HutaoEvolveTriggered
+            or os.clock() < RuntimeFix.HutaoEvolveRetryAt
         then
             return false
         end
@@ -11425,10 +13521,10 @@ end
             end
         end
 
-        if HutaoEvoFarmStarted then
+        if RuntimeFix.HutaoEvoFarmStarted then
             return false
         end
-        HutaoEvoFarmStarted = true
+        RuntimeFix.HutaoEvoFarmStarted = true
         LastLobbyJoinAction = joinHutaoEvoFarm
         LastLobbyJoinAttemptClock = os.clock()
 
@@ -11481,7 +13577,7 @@ end
         end)
 
         if not ok then
-            HutaoEvoFarmStarted = false
+            RuntimeFix.HutaoEvoFarmStarted = false
             ActiveLobbyQueue = nil
 
             warn("[AutoEvoHutao] Failed to join queue:", err)
@@ -13778,7 +15874,7 @@ end
     -- Respawn
     --==================================================
 
-    local CharacterAddedConnection =
+    RuntimeFix.CharacterAddedConnection =
         LocalPlayer.CharacterAdded:Connect(function()
             if AutoFarmSession.Cancelled then
                 return
@@ -13792,7 +15888,10 @@ end
         end)
 
     table.insert(AutoFarmSession.Cleanups, function()
-        CharacterAddedConnection:Disconnect()
+        if RuntimeFix.CharacterAddedConnection then
+            RuntimeFix.CharacterAddedConnection:Disconnect()
+            RuntimeFix.CharacterAddedConnection = nil
+        end
     end)
 
     table.insert(AutoFarmSession.Cleanups, function()
@@ -14451,12 +16550,26 @@ end
             yeStatusLabel =
                 createStatusRow(content, "Ye | รอข้อมูล", 0.68, 0.51)
 
-            for _, label in ipairs({
+            accessoryView.SolarStatusLabel =
+                createStatusRow(
+                    content,
+                    "Solar Radiance | รอข้อมูล",
+                    0.76,
+                    0.51
+                )
+
+            for index, label in ipairs({
                 rinStatusLabel,
                 frierenStatusLabel,
                 yeStatusLabel,
+                accessoryView.SolarStatusLabel,
             }) do
-                label.Size = UDim2.fromScale(0.31, 0.115)
+                label.Position = UDim2.fromScale(
+                    0.01 + (index - 1) * 0.25,
+                    0.51
+                )
+
+                label.Size = UDim2.fromScale(0.235, 0.115)
                 label.TextWrapped = true
                 label.TextYAlignment = Enum.TextYAlignment.Top
             end
@@ -15360,6 +17473,14 @@ end
             local data = RuntimeFix.readAccount()
             refreshAccessoryView(data)
 
+            if accessoryView.SolarStatusLabel then
+                accessoryView.SolarStatusLabel.Text = getTrialsUnitStatusText(
+                    data,
+                    "cha_hae_in",
+                    "Solar Radiance"
+                )
+            end
+
             if rinStatusLabel then
                 rinStatusLabel.Text = getTrialsUnitStatusText(
                     data,
@@ -15685,6 +17806,319 @@ end
             )
         end)
     end
+
+RuntimeFix.MirrorBlessing = {
+    Enabled = true,
+    Priority = {},
+    Fallback = "Highest Rarity",
+    Status = "รอข้อเสนอ",
+}
+
+function RuntimeFix.startMirrorBlessing()
+    if RuntimeFix.MirrorBlessingRunning
+        or AutoFarmSession.Cancelled
+    then
+        return
+    end
+
+    RuntimeFix.MirrorBlessingRunning = true
+
+    local alive = true
+    local dirty = true
+    local connections = {}
+    local configModule, packet, definitions
+    local pending, lastSentEnds
+    local retryAt = 0
+
+    local ranks = {
+        Common = 1,
+        Rare = 2,
+        Epic = 3,
+    }
+
+    -- ค่าอ้างอิงจากไฟล์แนบ ใช้เมื่อ Config ไม่ระบุ Rarity
+    local knownRarity = {
+        Sharp = "Common",
+        BigHeart = "Common",
+        Swift = "Common",
+        ShardSnack = "Rare",
+        ChainShatter = "Rare",
+        MirrorArmor = "Epic",
+        SpareHeart = "Epic",
+    }
+
+    local function active()
+        local mode = workspace:GetAttribute("Mode")
+
+        return alive
+            and not AutoFarmSession.Cancelled
+            and game.PlaceId == 109151342576374
+            and (
+                mode == "fateraid"
+                or mode == "floodescape"
+            )
+    end
+
+    local function historyCount(id)
+        local raw = LocalPlayer:GetAttribute("FateBlessings")
+
+        if raw == nil then
+            return 0
+        end
+
+        assert(type(raw) == "string", "Invalid FateBlessings")
+
+        local count = 0
+
+        for part in raw:gmatch("[^,]+") do
+            if part:match("^%s*(.-)%s*$") == id then
+                count += 1
+            end
+        end
+
+        return count
+    end
+
+    local function setup()
+        if definitions and configModule.Parent and packet.Parent then
+            return true
+        end
+
+        definitions = nil
+
+        if os.clock() < retryAt then
+            return false
+        end
+
+        retryAt = os.clock() + 1
+
+        local assets = ReplicatedStorage:FindFirstChild("assets")
+        local folder = assets and assets:FindFirstChild("config")
+
+        configModule = folder and folder:FindFirstChild("FateBlessings")
+        packet = ReplicatedStorage:FindFirstChild("FateBlessingPick")
+
+        if not configModule or not packet then
+            return false
+        end
+
+        assert(
+            configModule:IsA("ModuleScript"),
+            "Invalid FateBlessings module"
+        )
+
+        assert(
+            packet:IsA("RemoteEvent"),
+            "Invalid FateBlessingPick"
+        )
+
+        local config = require(configModule)
+
+        assert(
+            type(config) == "table"
+                and type(config.List) == "table",
+            "FateBlessings.List unavailable"
+        )
+
+        local actual = {}
+
+        for key, def in pairs(config.List) do
+            assert(
+                type(def) == "table",
+                "Invalid Blessing definition"
+            )
+
+            local id = type(def.Id) == "string" and def.Id
+                or type(key) == "string" and key
+
+            assert(
+                id and id ~= "" and not actual[id],
+                "Invalid Blessing ID"
+            )
+
+            actual[id] = {
+                Name = type(def.Name) == "string" and def.Name or id,
+                Rarity = type(def.Rarity) == "string" and def.Rarity
+                    or knownRarity[id],
+            }
+        end
+
+        assert(next(actual), "Empty FateBlessings.List")
+
+        definitions = actual
+        return true
+    end
+
+    local function tick()
+        local settings = RuntimeFix.MirrorBlessing
+
+        if pending then
+            if historyCount(pending.id) > pending.before then
+                settings.Status = "ได้รับ: " .. pending.id
+                pending = nil
+
+            elseif workspace:GetServerTimeNow() > pending.endsAt + 5 then
+                settings.Status = "รอยืนยันหมดเวลา — ไม่ส่งซ้ำรอบเดิม"
+                pending = nil
+            end
+        end
+
+        if not settings.Enabled
+            or not AutoFarmEnabled
+            or not active()
+        then
+            return
+        end
+
+        if not setup() then
+            settings.Status = "รอ Config / FateBlessingPick"
+            return
+        end
+
+        if pending then
+            return
+        end
+
+        local raw = LocalPlayer:GetAttribute("FateOffer")
+        local endsAt = LocalPlayer:GetAttribute("FateOfferEnds")
+
+        if type(raw) ~= "string" or raw == "" then
+            return
+        end
+
+        if type(endsAt) ~= "number" or endsAt ~= endsAt then
+            return
+        end
+
+        if workspace:GetServerTimeNow() >= endsAt
+            or lastSentEnds == endsAt
+        then
+            return
+        end
+
+        local offered, seen = {}, {}
+
+        for part in raw:gmatch("[^,]+") do
+            local id = part:match("^%s*(.-)%s*$")
+
+            if id ~= "" and not seen[id] then
+                assert(
+                    definitions[id],
+                    "Unknown offered Blessing: " .. id
+                )
+
+                seen[id] = true
+                table.insert(offered, id)
+            end
+        end
+
+        if #offered == 0 then
+            return
+        end
+
+        local chosen
+
+        for _, id in ipairs(settings.Priority) do
+            if seen[id] then
+                chosen = id
+                break
+            end
+        end
+
+        if not chosen then
+            chosen = offered[1]
+
+            if settings.Fallback == "Highest Rarity" then
+                for _, id in ipairs(offered) do
+                    if (ranks[definitions[id].Rarity] or 0)
+                        > (ranks[definitions[chosen].Rarity] or 0)
+                    then
+                        chosen = id
+                    end
+                end
+            end
+        end
+
+        -- ตรวจข้อเสนอสดอีกครั้งก่อนส่ง
+        if not active()
+            or not settings.Enabled
+            or not AutoFarmEnabled
+            or LocalPlayer:GetAttribute("FateOffer") ~= raw
+            or LocalPlayer:GetAttribute("FateOfferEnds") ~= endsAt
+            or workspace:GetServerTimeNow() >= endsAt
+        then
+            return
+        end
+
+        local before = historyCount(chosen)
+
+        -- ล็อกก่อนส่ง ป้องกันคำขอซ้ำเมื่อผลยังไม่แน่นอน
+        lastSentEnds = endsAt
+        pending = {
+            id = chosen,
+            before = before,
+            endsAt = endsAt,
+        }
+
+        settings.Status = "ส่งเลือก: " .. chosen .. " — รอยืนยัน"
+        packet:FireServer(chosen)
+    end
+
+    local function changed()
+        dirty = true
+    end
+
+    for _, name in ipairs({
+        "FateOffer",
+        "FateOfferEnds",
+        "FateBlessings",
+    }) do
+        table.insert(
+            connections,
+            LocalPlayer:GetAttributeChangedSignal(name):Connect(changed)
+        )
+    end
+
+    table.insert(
+        connections,
+        workspace:GetAttributeChangedSignal("Mode"):Connect(changed)
+    )
+
+    table.insert(AutoFarmSession.Cleanups, function()
+        alive = false
+
+        for _, connection in ipairs(connections) do
+            connection:Disconnect()
+        end
+
+        table.clear(connections)
+        RuntimeFix.MirrorBlessingRunning = nil
+    end)
+
+    task.spawn(function()
+        local nextCheck = 0
+
+        while alive and not AutoFarmSession.Cancelled do
+            if dirty or os.clock() >= nextCheck then
+                dirty = false
+                nextCheck = os.clock() + 1
+
+                local ok, err = pcall(tick)
+
+                if not ok then
+                    RuntimeFix.MirrorBlessing.Enabled = false
+                    RuntimeFix.MirrorBlessing.Status = tostring(err)
+
+                    warn("[MirrorBlessing] " .. tostring(err))
+                end
+            end
+
+            task.wait(0.15)
+        end
+    end)
+end
+
+RuntimeFix.startMirrorBlessing()
 
     RuntimeFix.startKaiTunOverlay()
 
@@ -16521,17 +18955,17 @@ end
 
     RuntimeFix.startWebhook()
 
-    local LobbyAutoJoinWatcherStarted = false
+    RuntimeFix.LobbyAutoJoinWatcherStarted = false
 
     function startLobbyAutoJoinWatcher()
         if game.PlaceId ~= AUTO_JOIN_PLACE_ID
-            or LobbyAutoJoinWatcherStarted
+            or RuntimeFix.LobbyAutoJoinWatcherStarted
             or AutoFarmSession.Cancelled
         then
             return
         end
 
-        LobbyAutoJoinWatcherStarted = true
+        RuntimeFix.LobbyAutoJoinWatcherStarted = true
 
         task.spawn(function()
             while not AutoFarmSession.Cancelled do
@@ -16635,7 +19069,7 @@ end
                         cycleNextRoomNumber()
                         LobbyRetryCount += 1
 
-                        HutaoEvoFarmStarted = false
+                        RuntimeFix.HutaoEvoFarmStarted = false
                         SukunaEvoFarmStarted = false
 
                         -- เก็บงานเดิมไว้ให้ลูปถัดไปเรียกใหม่
@@ -16792,7 +19226,7 @@ end
                 end
 
                 AutoJoinStarted = false
-                HutaoEvoFarmStarted = false
+                RuntimeFix.HutaoEvoFarmStarted = false
                 SukunaEvoFarmStarted = false
                 ActiveLobbyQueue = nil
                 LastLobbyJoinAttemptClock = os.clock()
@@ -16821,7 +19255,7 @@ end
                 end
             end
 
-            LobbyAutoJoinWatcherStarted = false
+            RuntimeFix.LobbyAutoJoinWatcherStarted = false
         end)
     end
 
@@ -17833,6 +20267,18 @@ end
         end
 
         if RuntimeFix.trialsEvolutionComplete(data) then
+            if not RuntimeFix.isSolarInventoryReady(data) then
+                return RuntimeFix.getSolarFarmStage(data)
+            end
+
+            if not RuntimeFix.isSolarEvolutionReady(data) then
+                local evolution = RuntimeFix.getTrialsEvolutionPlan(data)
+
+                assert(evolution, "Solar Evolution plan unavailable")
+
+                return evolution.Target, evolution.Reason
+            end
+
             local plan = RuntimeFix.getAccessoryCollectionPlan(data)
             if plan.Recipe then
                 return plan.Target, plan.Reason
@@ -18164,6 +20610,11 @@ end
     end
 
     function RuntimeFix.resetFarmRound()
+        RuntimeFix.FateStartCharacter = nil
+        RuntimeFix.FloodCombatGate = nil
+        RuntimeFix.FloodContext = nil
+        RuntimeFix.ActiveSkillCombo = nil
+        RuntimeFix.NextAutoSkillSlot = 1
         IsHealing = false
         stopHover()
         resetRubbleState()
@@ -18203,6 +20654,7 @@ end
 
             local raidCharacters = {
                 sololevelingraid = "sung_jinwoo",
+                fateraid = "cha_hae_in",
             }
 
             local function ownsRaidCharacter(data, character)
@@ -18394,7 +20846,11 @@ end
 
                     -- Raid/BathTub ยืนยันรางวัลเฉพาะรอบที่ชนะ (รอบ failed ไม่มี payout ให้รอ)
                     if status ~= "failed"
-                        and (huntingCharacter or mode == "spiritedawayraid")
+                        and (
+                            huntingCharacter
+                            or mode == "spiritedawayraid"
+                            or mode == "fateraid"
+                        )
                     then
                         local payoutStatus = participant.payoutStatus
                             and participant.payoutStatus:get()
@@ -18740,7 +21196,7 @@ end
             if not ok then
                 ActiveLobbyQueue = nil
                 AutoJoinStarted = false
-                HutaoEvoFarmStarted = false
+                RuntimeFix.HutaoEvoFarmStarted = false
                 SukunaEvoFarmStarted = false
 
                 warn("[AutoJoin] Action failed:", result)
