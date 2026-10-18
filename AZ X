@@ -1,5 +1,5 @@
 local AutoSkillWarn = warn
-local AUTO_SKILL_DEBUG = true -- หลังตรวจเสร็จเปลี่ยนเป็น false
+local AUTO_SKILL_DEBUG = false -- หลังตรวจเสร็จเปลี่ยนเป็น false
 
 
 
@@ -4608,6 +4608,7 @@ do
 
     -- โหมดทดลอง: ร่างจริงอยู่เหนือมอน ร่างปลอมอยู่ใกล้มอน
     local function stopHover()
+        RuntimeFix.FloodGroundStand = nil
         RuntimeFix.FloodHolding = nil
 
         if RuntimeFix.FloodPrompt then
@@ -6301,7 +6302,11 @@ do
             if AutoFarmSession.Cancelled
                 or not AutoFarmEnabled
                 or not state
-                or state.skillKey ~= "2"
+                or (
+                    state.skillKey ~= "2"
+                    and game:GetService("UserInputService").PreferredInput
+                        ~= Enum.PreferredInput.Touch
+                )
                 or root ~= getCharacterRoot()
             then
                 return original(...)
@@ -6327,6 +6332,13 @@ do
             -- รักษาโครงสร้างผลลัพธ์จริงและค่าที่ส่งคืนเพิ่มเติม
             local results = table.pack(original(...))
             local result = results[1]
+
+            if typeof(result) == "Vector3" then
+                results[1] = position
+                state.lastValidAim = position
+
+                return table.unpack(results, 1, results.n)
+            end
 
             if type(result) ~= "table" then
                 if not patch.InvalidResultLogged then
@@ -6622,9 +6634,140 @@ do
         return ready == true
     end
 
+    function RuntimeFix.invokeAutoSkill(controller, slot, touchInput)
+        if not touchInput then
+            return controller.performSkill(slot)
+        end
+
+        local patch = RuntimeFix.MouseAimPatch
+        local aim = patch and patch.Module
+
+        assert(
+            type(aim) == "table"
+                and type(aim.IsAiming) == "function"
+                and type(aim.AimingSlot) == "function",
+            "Touch MouseAim state API unavailable"
+        )
+
+        assert(
+            type(controller.touchSkillUp) == "function",
+            "characterController.touchSkillUp unavailable"
+        )
+
+        local character = getCharacter()
+
+        local function cooldown()
+            if not ultimateNamespace then
+                ultimateNamespace = RuntimeFix.requireModule(
+                    ReplicatedStorage,
+                    { "game", "stores", "playerNamespace" }
+                )
+            end
+
+            assert(
+                type(ultimateNamespace.getLocalPlayerStore) == "function"
+                    and type(ultimateNamespace.skillCooldownKey) == "function",
+                "Touch cooldown API unavailable"
+            )
+
+            local store = ultimateNamespace.getLocalPlayerStore()
+            local state = store and store.state
+
+            assert(
+                state and state.character and state.cooldowns,
+                "Touch cooldown state unavailable"
+            )
+
+            local name = state.character:get()
+
+            assert(
+                type(name) == "string" and name ~= "",
+                "Touch character state unavailable"
+            )
+
+            local key = ultimateNamespace.skillCooldownKey(name, slot)
+            local entry = state.cooldowns:get(key)
+            local till = entry and entry:get() or 0
+
+            assert(
+                type(till) == "number" and till == till,
+                "Invalid Touch skill cooldown"
+            )
+
+            return till
+        end
+
+        local before = cooldown()
+
+        if aim.IsAiming() then
+            -- ไม่ปล่อยหรือยกเลิกการเล็งของสกิลช่องอื่น
+            if aim.AimingSlot() ~= slot then
+                RuntimeFix.skillIssue(
+                    "Touch aim belongs to another slot",
+                    "Requested=" .. slot
+                )
+                return false
+            end
+        else
+            local accepted = controller.performSkill(slot)
+
+            if not aim.IsAiming() then
+                return accepted == true
+            end
+
+            if aim.AimingSlot() ~= slot then
+                RuntimeFix.skillIssue(
+                    "Touch aim changed slot",
+                    "Requested=" .. slot
+                )
+                return false
+            end
+        end
+
+        if AutoFarmSession.Cancelled
+            or not AutoFarmEnabled
+            or getCharacter() ~= character
+        then
+            return false
+        end
+
+        -- ใช้เส้นทางปล่อยปุ่มเดียวกับระบบมือถือของเกม
+        controller.touchSkillUp(slot)
+
+        -- ไม่ถือว่า Begin/Release สำเร็จเท่ากับเริ่มร่ายสำเร็จ
+        local deadline = os.clock() + 0.6
+
+        repeat
+            if AutoFarmSession.Cancelled
+                or not AutoFarmEnabled
+                or getCharacter() ~= character
+            then
+                return false
+            end
+
+            if isGameSkillBusy() or cooldown() > before then
+                return true
+            end
+
+            if not aim.IsAiming() then
+                task.wait(0.05)
+            else
+                task.wait(0.1)
+            end
+        until os.clock() >= deadline
+
+        RuntimeFix.skillIssue(
+            "Touch release not confirmed",
+            "Slot=" .. slot
+        )
+
+        return false
+    end
+
     local function pressSkillKey(keyCode, worldPosition)
         if AutoFarmSession.Cancelled
             or not AutoFarmEnabled
+            or RuntimeFix.SkillInvokeBusy
             or isGameSkillBusy()
         then
             return false
@@ -6644,9 +6787,16 @@ do
             return false
         end
 
-        if slot == 2 and not RuntimeFix.ensureMouseAimAPI() then
+        local touchInput =
+            game:GetService("UserInputService").PreferredInput
+                == Enum.PreferredInput.Touch
+
+        if (slot == 2 or touchInput)
+            and not RuntimeFix.ensureMouseAimAPI()
+        then
             RuntimeFix.skillIssue(
-                "Skill 2 MouseAim API unavailable"
+                "MouseAim API unavailable",
+                "Slot=" .. slot
             )
             return false
         end
@@ -6762,11 +6912,16 @@ do
             return false
         end
 
+        RuntimeFix.SkillInvokeBusy = true
+
         local success, result = xpcall(function()
-            -- ใช้บริบทสคริปต์เกมเฉพาะช่วงเรียกสกิล
             changeIdentity(2)
 
-            return controller.performSkill(slot)
+            return RuntimeFix.invokeAutoSkill(
+                controller,
+                slot,
+                touchInput
+            )
         end, function(err)
             return debug.traceback(tostring(err), 2)
         end)
@@ -6776,6 +6931,8 @@ do
             changeIdentity,
             previousIdentity
         )
+
+        RuntimeFix.SkillInvokeBusy = nil
 
         if not restored then
             SkillAimState = nil
@@ -7765,6 +7922,134 @@ do
         )
     end
 
+    function RuntimeFix.floodStandOnGround(gate)
+        local root = getCharacterRoot()
+        local humanoid = getHumanoid()
+        local character = getCharacter()
+        local world = workspace:FindFirstChild("World")
+
+        if not root or not humanoid or not character
+            or humanoid.Health <= 0
+            or not world
+            or not gate or not gate.Parent
+            or not gate:IsA("BasePart")
+            or not AutoFarmEnabled
+            or AutoFarmSession.Cancelled
+            or not RuntimeFix.isFlood()
+            or workspace:GetAttribute("FloodPhase") ~= "block" then
+            return false
+        end
+
+        local water = workspace:GetAttribute("FloodLevel")
+        if type(water) ~= "number" then return false end
+
+        local previous = RuntimeFix.FloodGroundStand
+
+        if previous
+            and previous.Root == root
+            and previous.Gate == gate
+            and previous.Support.Parent
+            and previous.FloorY > water
+            and (root.Position - previous.Position).Magnitude < 3
+            and (root.Position - gate.Position).Magnitude <= 18 then
+
+            humanoid:Move(Vector3.zero, false)
+            return true
+        end
+
+        stopHover()
+
+        -- คืนการชนพื้นจริง แทนการตรึงตัวด้วย AlignPosition
+        RememberCharacter(character)
+
+        for part, original in pairs(collisionSaved) do
+            if part.Parent and part:IsDescendantOf(character) then
+                part.CanCollide = original
+            end
+        end
+
+        if os.clock() < (RuntimeFix.FloodGroundRetryAt or 0) then
+            return false
+        end
+
+        RuntimeFix.FloodGroundRetryAt = os.clock() + 0.5
+
+        local clearance = humanoid.HipHeight + root.Size.Y * 0.5
+
+        -- สูตรความสูงของ Humanoid แบบ R6 ต้องรวมความยาวขา
+        if humanoid.RigType == Enum.HumanoidRigType.R6 then
+            local leg = character:FindFirstChild("Left Leg")
+            if not leg or not leg:IsA("BasePart") then
+                return false
+            end
+            clearance += leg.Size.Y
+        end
+
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Include
+        params.FilterDescendantsInstances = { world }
+        params.RespectCanCollide = true
+        params.IgnoreWater = true
+
+        local center = gate.Position
+
+        -- ลองจุดใต้ตัวก่อน แล้วจึงหาพื้นรอบศูนย์กลาง Gate
+        local candidates = {
+            root.Position,
+            center,
+            center + Vector3.new(8, 0, 0),
+            center + Vector3.new(-8, 0, 0),
+            center + Vector3.new(0, 0, 8),
+            center + Vector3.new(0, 0, -8),
+        }
+
+        for _, candidate in ipairs(candidates) do
+            local hit = workspace:Raycast(
+                Vector3.new(candidate.X, center.Y + 18, candidate.Z),
+                Vector3.new(0, -(36 + clearance), 0),
+                params
+            )
+
+            if hit
+                and hit.Position.Y > water
+                and hit.Normal.Y > 0
+                and hit.Normal.Y >= math.cos(
+                    math.rad(humanoid.MaxSlopeAngle)
+                ) then
+
+                local position = hit.Position
+                    + Vector3.new(0, clearance + 0.05, 0)
+
+                if (position - center).Magnitude <= 17 then
+                    RuntimeFix.FloodGroundStand = {
+                        Root = root,
+                        Gate = gate,
+                        Support = hit.Instance,
+                        FloorY = hit.Position.Y,
+                        Position = position,
+                    }
+
+                    humanoid.AutoRotate = true
+                    humanoid:Move(Vector3.zero, false)
+
+                    root.CFrame = CFrame.new(position)
+                        * root.CFrame.Rotation
+
+                    root.AssemblyLinearVelocity = Vector3.zero
+                    root.AssemblyAngularVelocity = Vector3.zero
+
+                    return true
+                end
+            end
+        end
+
+        RuntimeFix.floodStatus(
+            "Hold Gate: ยังไม่พบพื้นแห้งที่ยืนได้ภายในเขต"
+        )
+
+        return false
+    end
+
     function RuntimeFix.floodHold(position)
         local root = getCharacterRoot()
         if not root then return false end
@@ -8115,22 +8400,6 @@ do
                 return
             end
 
-            local waitPosition = RuntimeFix.floodGatePosition(
-                RuntimeFix.floodSafe(root.Position),
-                activeGate
-            )
-
-            if not waitPosition then
-                RuntimeFix.FloodCombatGate = nil
-
-                RuntimeFix.floodStatus(
-                    label .. " | Gate ต่ำกว่าระยะปลอดภัยเหนือน้ำ"
-                )
-
-                RuntimeFix.floodHold(root.Position)
-                return
-            end
-
             local targetRoot = gateEnemy
                 and getEnemyRoot(gateEnemy)
 
@@ -8173,11 +8442,11 @@ do
             else
                 RuntimeFix.FloodCombatGate = nil
 
-                RuntimeFix.floodStatus(
-                    label .. " | Hold Gate: รอมอนเข้ามา"
-                )
-
-                RuntimeFix.floodHold(waitPosition)
+                if RuntimeFix.floodStandOnGround(activeGate) then
+                    RuntimeFix.floodStatus(
+                        label .. " | Hold Gate: ยืนบนพื้น"
+                    )
+                end
             end
 
             return
@@ -8506,6 +8775,7 @@ do
 
             -- ตรวจน้ำระหว่างเดินทางด้วย ไม่ใช่เฉพาะปลายทาง
             if RuntimeFix.isFlood()
+                and not RuntimeFix.FloodGroundStand
                 and not RuntimeFix.EndRoundPaused
                 and PlayerGui:GetAttribute("EndScreenActive") ~= true then
 
@@ -8534,7 +8804,13 @@ do
 
                 for _, v in ipairs(char:GetDescendants()) do
                     if v:IsA("BasePart") then
-                        if waiting and v == waiting.Root then
+                        if RuntimeFix.FloodGroundStand then
+                            local original = collisionSaved[v]
+
+                            if original ~= nil then
+                                v.CanCollide = original
+                            end
+                        elseif waiting and v == waiting.Root then
                             v.CanCollide = true
                         elseif v.CanCollide then
                             v.CanCollide = false
