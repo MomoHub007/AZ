@@ -12749,6 +12749,25 @@ do
     end)
 end
 
+function ZeroXContext.MultiSelection(value)
+    local result = {}
+
+    if type(value) == "string" and value ~= "" then
+        result[value] = true
+    elseif type(value) == "table" then
+        for key, enabled in pairs(value) do
+            if type(key) == "number"
+                and type(enabled) == "string" then
+                result[enabled] = true
+            elseif type(key) == "string" and enabled == true then
+                result[key] = true
+            end
+        end
+    end
+
+    return result
+end
+
 --------------------------------------------------------------------------------
 -- CRAFTING / ACCESSORY
 --------------------------------------------------------------------------------
@@ -12780,7 +12799,7 @@ do
 
         state.enabled = craftUI.Value
         state.farm = farmUI.Value
-        state.target = itemUI.Value
+        state.target = ZeroXContext.MultiSelection(itemUI.Value)
         state.money = nil
         state.icons = next(accessoryIcons)
             and accessoryIcons or state.icons
@@ -12796,11 +12815,36 @@ do
     itemUI = section:AddDropdown("ZeroXCraftAccessory", {
         Title = "Accessory",
         Values = {},
+        Multi = true,
+        Default = {},
         AllowNull = true,
         Searchable = true,
-        Description = "เลือกสูตร; ระบบหยุดเมื่อมี Accessory เป้าหมายแล้ว",
-        Callback = save,
+        Description = "เลือกหลายสูตร; ทำตามลำดับรายการและข้ามของที่มีแล้ว",
+
+        Callback = function()
+            if ready and not restoring
+                and craftUI and craftUI.Value then
+
+                craftUI:SetValue(false)
+                lastError =
+                    "เปลี่ยนรายการ — เปิด Auto Craft ใหม่เพื่อเริ่ม"
+            end
+
+            save()
+        end,
     })
+
+    -- รองรับค่าแบบเลือกตัวเดียวจาก Profile / Checkpoint เดิม
+    do
+        local originalSetValue = itemUI.SetValue
+
+        function itemUI:SetValue(value)
+            originalSetValue(
+                self,
+                ZeroXContext.MultiSelection(value)
+            )
+        end
+    end
 
     -- รูปเล็กข้างชื่อ เฉพาะ Dropdown Accessory
     do
@@ -13093,7 +13137,22 @@ do
         table.sort(values)
         assert(#values > 0, "No craft recipes")
 
+        local previous = ZeroXContext.MultiSelection(itemUI.Value)
+        local kept = {}
+
+        for label in pairs(previous) do
+            if lookup[label] then
+                kept[label] = true
+            end
+        end
+
+        local wasRestoring = restoring
+        restoring = true
+
         itemUI:SetValues(values)
+        itemUI:SetValue(kept)
+
+        restoring = wasRestoring
         state.values = values
         save()
 
@@ -13310,7 +13369,8 @@ do
         -- รองรับแผนจากเวอร์ชันเก่า หรือการเปลี่ยนเป้าหมายในด่าน
         if type(state.recipe) ~= "table"
             or type(state.sources) ~= "table"
-            or state.craftTarget ~= itemUI.Value then
+            or ZeroXContext.MultiSelection(itemUI.Value)[state.craftTarget]
+                ~= true then
 
             show("กลับ Lobby เพื่อเตรียมแผน Material ใหม่")
             return "Leave"
@@ -13365,7 +13425,7 @@ do
         return action
     end
 
-    local function launch(route)
+    local function launch(route, recipe, targetLabel)
         if LocalPlayer:GetAttribute("QueueRoom") ~= nil
             or LocalPlayer:GetAttribute("MatchSearching") then
 
@@ -13410,8 +13470,8 @@ do
             sources[tostring(chapter)] = ids
         end
 
-        state.recipe = runtime.recipes[itemUI.Value]
-        state.craftTarget = itemUI.Value
+        state.recipe = recipe
+        state.craftTarget = targetLabel
         state.sources = sources
         state.materialNames = runtime.materialNames
         state.mission = route
@@ -13478,13 +13538,6 @@ do
 
         if not runtime then runtime = setup() end
 
-        local recipe = runtime.recipes[itemUI.Value]
-
-        if not recipe then
-            show("เลือก Accessory ก่อนเปิดใช้งาน")
-            return
-        end
-
         local data = readAccount()
 
         if not data then
@@ -13492,8 +13545,35 @@ do
             return
         end
 
-        if (tonumber(data.accessory[recipe.id]) or 0) > 0 then
-            halt("มี " .. recipe.name .. " แล้ว — เสร็จสิ้น")
+        local selectedItems =
+            ZeroXContext.MultiSelection(itemUI.Value)
+
+        if not next(selectedItems) then
+            show("เลือก Accessory ก่อนเปิดใช้งาน")
+            return
+        end
+
+        local recipe, targetLabel
+
+        for _, label in ipairs(itemUI.Values) do
+            if selectedItems[label] then
+                local candidate = assert(
+                    runtime.recipes[label],
+                    "Recipe unavailable: " .. label
+                )
+
+                if (tonumber(data.accessory[candidate.id]) or 0)
+                    <= 0 then
+
+                    recipe = candidate
+                    targetLabel = label
+                    break
+                end
+            end
+        end
+
+        if not recipe then
+            halt("มี Accessory ครบทุกรายการที่เลือกแล้ว")
             return
         end
 
@@ -13503,7 +13583,11 @@ do
 
         if next(missing) then
             if farmUI.Value then
-                launch(materialRoute(data, missing))
+                launch(
+                    materialRoute(data, missing),
+                    recipe,
+                    targetLabel
+                )
             end
             return
         end
@@ -13530,7 +13614,17 @@ do
                 and (tonumber(updated.accessory[recipe.id]) or 0)
                     > before then
 
-                halt("คราฟ " .. recipe.name .. " สำเร็จ")
+                restore()
+
+                state.recipe = nil
+                state.craftTarget = nil
+                state.mission = nil
+
+                save()
+                show(
+                    "คราฟ " .. recipe.name
+                        .. " สำเร็จ — ตรวจรายการถัดไป"
+                )
                 return
             end
 
@@ -13647,6 +13741,8 @@ do
     local labels = {}
     local choices = {}
     local selected
+    local targets = {}
+    local pendingTargets
 
     local lastJSON
     local lastStatus
@@ -13701,6 +13797,8 @@ do
 
         state.enabled = toggle.Value == true
         state.target = selected
+        state.targets = targets
+        state.pendingTargets = pendingTargets
 
         local encoded = Http:JSONEncode(state)
 
@@ -13763,42 +13861,59 @@ do
         show(message)
     end
 
-    dropdown = section:AddDropdown(
-        "ZeroXEvolveCharacter",
-        {
-            Title = "Character in Slot",
-            Values = {},
-            AllowNull = true,
-            Searchable = true,
+    local function complete(message)
+        restore()
 
-            Callback = function(value)
-                if restoring then
-                    return
-                end
+        selected = nil
+        cache = nil
+        state.plan = nil
+        state.mission = nil
 
-                local choice = choices[value]
+        save()
+        show(message)
+    end
 
-                if choice then
-                    if toggle and toggle.Value then
-                        stop(
-                            "เปลี่ยนตัวละคร — เปิดใหม่เพื่อเริ่ม"
-                        )
-                    end
+    dropdown = section:AddDropdown("ZeroXEvolveCharacter", {
+        Title = "Character in Slot",
+        Values = {},
+        Multi = true,
+        Default = {},
+        AllowNull = true,
+        Searchable = true,
+        Description = "เลือกหลายตัว; ทำตามลำดับ Slot และข้ามตัวที่ Evo แล้ว",
 
-                    selected = {
-                        slot = choice.slot,
-                        character = choice.character,
-                    }
+        Callback = function(value)
+            if restoring then return end
 
-                    cache = nil
-                    state.plan = nil
-                    state.mission = nil
+            if toggle and toggle.Value then
+                stop(
+                    "เปลี่ยนรายการ — เปิด Auto Evolve ใหม่เพื่อเริ่ม"
+                )
+            end
 
-                    save()
-                end
-            end,
-        }
-    )
+            pendingTargets =
+                ZeroXContext.MultiSelection(value)
+
+            targets = {}
+            selected = nil
+            cache = nil
+            state.plan = nil
+            state.mission = nil
+
+            save()
+        end,
+    })
+
+    do
+        local originalSetValue = dropdown.SetValue
+
+        function dropdown:SetValue(value)
+            originalSetValue(
+                self,
+                ZeroXContext.MultiSelection(value)
+            )
+        end
+    end
 
     toggle = section:AddToggle(
         "ZeroXAutoEvolveCharacter",
@@ -13853,37 +13968,71 @@ do
         labels = {}
         choices = {}
 
-        local current
-
         for _, row in ipairs(rows) do
             local info = data.CharactersData
                 and data.CharactersData[row.character]
 
-            local label =
+            local base =
                 "Slot " .. row.slot .. " — " .. row.character
-                .. (
-                    info
-                    and info.IsUltimateUnlocked == true
-                    and " [Evo]"
-                    or ""
-                )
 
+            local label = base .. (
+                info and info.IsUltimateUnlocked == true
+                and " [Evo]" or ""
+            )
+
+            choices[base] = row
             choices[label] = row
             table.insert(labels, label)
+        end
 
-            if selected
-                and selected.slot == row.slot
-                and selected.character == row.character then
+        -- แปลงชื่อจาก Dropdown/Profile เป็นตัวตน Slot + Character
+        if pendingTargets then
+            local resolved = {}
 
-                current = label
+            for label in pairs(pendingTargets) do
+                local base = label:gsub(" %[Evo%]$", "")
+
+                local row = assert(
+                    choices[label] or choices[base],
+                    "Saved Evo selection unavailable: " .. label
+                )
+
+                table.insert(resolved, {
+                    slot = row.slot,
+                    character = row.character,
+                })
+            end
+
+            table.sort(resolved, function(a, b)
+                return a.slot < b.slot
+            end)
+
+            targets = resolved
+            pendingTargets = nil
+            save()
+        end
+
+        -- คงตัวเลือกไว้ แม้ชื่อรายการเปลี่ยนเป็น [Evo]
+        local current, chosenLabels = {}, {}
+
+        for _, label in ipairs(labels) do
+            local row = choices[label]
+
+            for _, target in ipairs(targets) do
+                if target.slot == row.slot
+                    and target.character == row.character then
+
+                    current[label] = true
+                    table.insert(chosenLabels, label)
+                    break
+                end
             end
         end
 
-        local signature = table.concat(labels, "\n")
+        local signature = table.concat(labels, "\n") .. "\0"
+            .. table.concat(chosenLabels, "\n")
 
-        if signature ~= lastList
-            or dropdown.Value ~= current then
-
+        if signature ~= lastList then
             restoring = true
 
             dropdown:SetValues(labels)
@@ -14269,6 +14418,46 @@ do
         return "Leave"
     end
 
+    local function chooseTarget(data)
+        local first
+        local active
+
+        for _, target in ipairs(targets) do
+            local slot = data.UnlockedCharacters
+                and data.UnlockedCharacters[
+                    "Slot" .. target.slot
+                ]
+
+            assert(
+                slot and slot.Unlocked == true
+                    and slot.Character == target.character,
+                "ตัวละครใน Slot เปลี่ยน — เลือกใหม่"
+            )
+
+            local info = data.CharactersData
+                and data.CharactersData[target.character]
+
+            assert(
+                info
+                    and type(info.IsUltimateUnlocked) == "boolean",
+                "Evo state unavailable: " .. target.character
+            )
+
+            if not info.IsUltimateUnlocked then
+                first = first or target
+
+                if selected
+                    and selected.slot == target.slot
+                    and selected.character == target.character then
+
+                    active = target
+                end
+            end
+        end
+
+        return active or first
+    end
+
     local function tick()
         local data = read()
 
@@ -14292,6 +14481,35 @@ do
             ),
             "ปิด Auto Craft Accessory ก่อนใช้ Auto Evolve"
         )
+
+        if ZeroXContext.IsLobby() and not launched then
+            local target = chooseTarget(data)
+
+            if not target then
+                if #targets > 0 then
+                    stop("Evo ครบทุกตัวที่เลือกแล้ว")
+                else
+                    show("เลือก Character in Slot ก่อน")
+                end
+
+                return
+            end
+
+            if not selected
+                or selected.slot ~= target.slot
+                or selected.character ~= target.character then
+
+                selected = {
+                    slot = target.slot,
+                    character = target.character,
+                }
+
+                cache = nil
+                state.plan = nil
+                state.mission = nil
+                save()
+            end
+        end
 
         if not selected then
             show("เลือก Character in Slot ก่อน")
@@ -14319,9 +14537,8 @@ do
         end
 
         if checkTarget(data) then
-            stop(
-                selected.character
-                    .. " [Evo] — เสร็จสิ้น"
+            complete(
+                selected.character .. " [Evo] — ตรวจตัวถัดไป"
             )
             return
         end
@@ -14411,6 +14628,7 @@ do
 
         if not alive
             or not toggle.Value
+            or not selected
             or selected.character ~= target
             or selected.slot ~= targetSlot then
 
@@ -14424,7 +14642,7 @@ do
         )
 
         if checkTarget(data) then
-            stop(target .. " [Evo]")
+            complete(target .. " [Evo] — ตรวจตัวถัดไป")
             return
         end
 
@@ -14464,7 +14682,9 @@ do
 
             if info and info.IsUltimateUnlocked == true then
                 updateSlots(fresh)
-                stop(target .. " [Evo] — สำเร็จ")
+                complete(
+                    target .. " [Evo] — สำเร็จ; ตรวจตัวถัดไป"
+                )
                 return
             end
         until os.clock() >= deadline
@@ -14490,6 +14710,11 @@ do
 
             state = loaded
             selected = state.target
+            targets = type(state.targets) == "table"
+                and state.targets
+                or (selected and { selected } or {})
+
+            pendingTargets = state.pendingTargets
 
             restoring = true
             toggle:SetValue(state.enabled == true)
