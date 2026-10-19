@@ -3304,6 +3304,11 @@ RuntimeFix.FarmOptions = {
             return false
         end
 
+        -- งานที่กำลังเดินทางถือสิทธิ์อยู่ ห้ามงานอื่นแย่ง Tween
+        if RuntimeFix.ActiveRootTween then
+            return false
+        end
+
         -- จบงานเดิมพร้อมคืนค่าก่อนเริ่มงานใหม่
         if RuntimeFix.RootTweenCleanup then
             RuntimeFix.RootTweenCleanup()
@@ -3314,6 +3319,28 @@ RuntimeFix.FarmOptions = {
 
         if previous then
             previous:Cancel()
+        end
+
+        if AlignPosition and AlignPosition.Parent then
+            AlignPosition.Enabled = false
+        end
+
+        if AlignOrientation and AlignOrientation.Parent then
+            AlignOrientation.Enabled = false
+        end
+
+        -- จัดความสูงปลอดภัยก่อนเริ่ม Tween เพียงครั้งเดียว
+        if RuntimeFix.isFlood() then
+            targetCFrame =
+                CFrame.new(RuntimeFix.floodSafe(targetCFrame.Position))
+                * targetCFrame.Rotation
+
+            local safeStart = RuntimeFix.floodSafe(root.Position)
+
+            if safeStart.Y > root.Position.Y then
+                root.CFrame =
+                    CFrame.new(safeStart) * root.CFrame.Rotation
+            end
         end
 
         local originalAutoRotate = humanoid.AutoRotate
@@ -3434,6 +3461,11 @@ RuntimeFix.FarmOptions = {
             do
                 if RuntimeFix.pauseFarmForSkill()
                     or (canContinue and not canContinue())
+                    or (
+                        RuntimeFix.isFlood()
+                        and RuntimeFix.floodSafe(targetCFrame.Position).Y
+                            > targetCFrame.Position.Y
+                    )
                 then
                     break
                 end
@@ -4137,6 +4169,18 @@ RuntimeFix.FarmOptions = {
         connection = RunService.Heartbeat:Connect(function(deltaTime)
             if HoverConnection ~= connection then
                 connection:Disconnect()
+                return
+            end
+
+            if RuntimeFix.ActiveRootTween then
+                if positionAlign.Parent then
+                    positionAlign.Enabled = false
+                end
+
+                if orientationAlign.Parent then
+                    orientationAlign.Enabled = false
+                end
+
                 return
             end
 
@@ -7635,7 +7679,17 @@ RuntimeFix.FarmOptions = {
         AlignPosition.Position = position
         AlignPosition.Parent = root
 
-        HoverConnection = RunService.Heartbeat:Connect(function()
+        local positionAlign = AlignPosition
+        local connection
+
+        connection = RunService.Heartbeat:Connect(function()
+            if HoverConnection ~= connection
+                or RuntimeFix.FloodHolding ~= holding
+            then
+                connection:Disconnect()
+                return
+            end
+
             local humanoid = getHumanoid()
 
             if AutoFarmSession.Cancelled
@@ -7645,10 +7699,16 @@ RuntimeFix.FarmOptions = {
                 or not root.Parent
                 or not humanoid
                 or humanoid.Health <= 0
+                or not positionAlign.Parent
                 or not RuntimeFix.isFlood()
-                or RuntimeFix.floodKey() ~= key then
-
+                or RuntimeFix.floodKey() ~= key
+            then
                 stopHover()
+                return
+            end
+
+            if RuntimeFix.ActiveRootTween then
+                positionAlign.Enabled = false
                 return
             end
 
@@ -7656,13 +7716,14 @@ RuntimeFix.FarmOptions = {
                 return
             end
 
-            AlignPosition.Position =
+            positionAlign.Position =
                 RuntimeFix.floodSafe(holding.Position)
 
-            AlignPosition.Enabled = true
-
+            positionAlign.Enabled = true
             root.AssemblyAngularVelocity = Vector3.zero
         end)
+
+        HoverConnection = connection
 
         return true
     end
@@ -13341,17 +13402,24 @@ function RuntimeFix.rememberFarmCharacter(character)
 end
 
 function RuntimeFix.spawnFarmTask(callback)
-    task.spawn(function()
+    local generation = RuntimeFix.FarmGeneration
+
+    return task.spawn(function()
         local ok, failure = xpcall(callback, function(problem)
             return debug.traceback(tostring(problem), 2)
         end)
 
-        if not ok and not AutoFarmSession.Cancelled then
+        if not ok
+            and not AutoFarmSession.Cancelled
+            and RuntimeFix.FarmGeneration == generation
+        then
             RuntimeFix.FarmLastError = failure
             AutoFarmEnabled = false
 
             stopHover()
             resetRubbleState()
+
+            AutoSkillWarn("[AutoFarm] " .. tostring(failure))
         end
     end)
 end
@@ -13421,6 +13489,28 @@ end)
             return
         end
 
+        RuntimeFix.FarmGeneration =
+            (RuntimeFix.FarmGeneration or 0) + 1
+
+        local farmGeneration = RuntimeFix.FarmGeneration
+
+        local previousWorker = RuntimeFix.FarmWorkerThread
+        RuntimeFix.FarmWorkerThread = nil
+
+        if previousWorker
+            and previousWorker ~= coroutine.running()
+            and coroutine.status(previousWorker) ~= "dead"
+        then
+            task.cancel(previousWorker)
+        end
+
+        if RuntimeFix.FarmNoclipConnection then
+            RuntimeFix.FarmNoclipConnection:Disconnect()
+            RuntimeFix.FarmNoclipConnection = nil
+        end
+
+        stopHover()
+        resetRubbleState()
         AutoFarmEnabled = true
 
         local noclipConnection = nil
@@ -13444,8 +13534,10 @@ end)
 
             -- ตรวจน้ำระหว่างเดินทางด้วย ไม่ใช่เฉพาะปลายทาง
             if RuntimeFix.isFlood()
+                and not RuntimeFix.ActiveRootTween
                 and not RuntimeFix.EndRoundPaused
-                and PlayerGui:GetAttribute("EndScreenActive") ~= true then
+                and PlayerGui:GetAttribute("EndScreenActive") ~= true
+            then
 
                 local root = getCharacterRoot()
                 local humanoid = getHumanoid()
@@ -13492,9 +13584,11 @@ end)
                 end
             end
         end)
-        RuntimeFix.spawnFarmTask(function()
+        RuntimeFix.FarmNoclipConnection = noclipConnection
+        RuntimeFix.FarmWorkerThread = RuntimeFix.spawnFarmTask(function()
             while AutoFarmEnabled
                 and not AutoFarmSession.Cancelled
+                and RuntimeFix.FarmGeneration == farmGeneration
             do
                 if not RuntimeFix.resolveFarmGameplay() then
                     stopHover()
@@ -13802,6 +13896,25 @@ end)
 
     function StopAutoFarm()
         AutoFarmEnabled = false
+
+        RuntimeFix.FarmGeneration =
+            (RuntimeFix.FarmGeneration or 0) + 1
+
+        local worker = RuntimeFix.FarmWorkerThread
+        RuntimeFix.FarmWorkerThread = nil
+
+        if worker
+            and worker ~= coroutine.running()
+            and coroutine.status(worker) ~= "dead"
+        then
+            task.cancel(worker)
+        end
+
+        if RuntimeFix.FarmNoclipConnection then
+            RuntimeFix.FarmNoclipConnection:Disconnect()
+            RuntimeFix.FarmNoclipConnection = nil
+        end
+
         IsHealing = false
         stopHover()
 
