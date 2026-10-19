@@ -4832,7 +4832,7 @@ do
 
         local skillState
 
-        if not retreatMode then
+        do
             local ok, result = pcall(function()
                 local store = RuntimeFix.requireModule(
                     LocalPlayer,
@@ -4888,6 +4888,11 @@ do
                     skillState.pending:get() == true
                     or skillState.till:get() > workspace:GetServerTimeNow()
                 )
+        end
+
+        -- ไม่เริ่ม Tween / Pivot / เปลี่ยนเป้าหมายระหว่างร่ายสกิล
+        if isUsingSkill() then
+            return false
         end
 
         local floodContext =
@@ -5167,6 +5172,19 @@ do
                 return
             end
 
+            -- ปล่อยให้สกิลควบคุมการเคลื่อนที่และทิศทาง
+            -- รวมถึงข้ามการดึงกลับเข้าเขต Gate ระหว่างสกิล
+            if not AutoFarmSession.Cancelled
+                and AutoFarmEnabled
+                and getCharacter() == character
+                and root.Parent
+                and humanoid.Parent
+                and humanoid.Health > 0
+                and RuntimeFix.pauseFarmForSkill()
+            then
+                return
+            end
+
             if (
                 floodContext
                 and RuntimeFix.floodKey() ~= floodContext
@@ -5246,13 +5264,55 @@ do
                 end
             end
 
+            local facing = getFacing(root.Position, center)
+            local trackingStationary = false
+
+            if usingSkill then
+                local movementLock =
+                    root:FindFirstChild("SkillMovementLock")
+
+                if movementLock and movementLock:IsA("Attachment") then
+                    local gamePosition =
+                        movementLock:FindFirstChildOfClass("AlignPosition")
+
+                    -- ใช้เฉพาะแรงตรึงตำแหน่งของสกิลตามโครงสร้างที่ตรวจพบ
+                    if gamePosition
+                        and gamePosition.Enabled
+                        and gamePosition.Mode
+                            == Enum.PositionAlignmentMode.OneAttachment
+                        and gamePosition.Attachment0 == movementLock
+                    then
+                        -- ให้แรงของเกมและ Auto Farm ไปยังจุดเดียวกัน
+                        gamePosition.Position = targetPosition
+                        trackingStationary = true
+
+                        local gameOrientation =
+                            movementLock:FindFirstChildOfClass(
+                                "AlignOrientation"
+                            )
+
+                        if gameOrientation
+                            and gameOrientation.Enabled
+                            and gameOrientation.Mode
+                                == Enum.OrientationAlignmentMode.OneAttachment
+                            and gameOrientation.Attachment0 == movementLock
+                        then
+                            gameOrientation.CFrame = facing
+                        end
+                    end
+                end
+            end
+
             positionAlign.Position = targetPosition
+            positionAlign.Enabled = true
 
-            -- ระหว่างใช้สกิล ปล่อยให้ระบบ Aim ของเกมควบคุมทิศ
-            orientationAlign.Enabled = not aimLocked
+            -- สกิลอยู่กับที่ให้หันตามมอนด้วย
+            -- ส่วนช่วงพุ่งถูกพักโดย pauseFarmForSkill() ก่อนถึงบล็อกนี้
+            orientationAlign.Enabled =
+                trackingStationary or not aimLocked
 
-            if not aimLocked then
-                orientationAlign.CFrame = getFacing(root.Position, center)
+            if orientationAlign.Enabled then
+                orientationAlign.CFrame = facing
             end
 
             root.AssemblyAngularVelocity = Vector3.zero
@@ -6093,6 +6153,79 @@ do
         end)
 
         return ok and busy == true
+    end
+
+    function RuntimeFix.pauseFarmForSkill()
+        if AutoFarmSession.Cancelled
+            or not AutoFarmEnabled
+            or not isGameSkillBusy()
+        then
+            return false
+        end
+
+        local character = getCharacter()
+        local root = getCharacterRoot()
+        local humanoid = getHumanoid()
+
+        if not character
+            or not root
+            or not humanoid
+            or humanoid.Health <= 0
+        then
+            return false
+        end
+
+        local movementLock = root:FindFirstChild("SkillMovementLock")
+
+        if not movementLock
+            or not movementLock:IsA("Attachment")
+        then
+            return false
+        end
+
+        -- สกิลอยู่กับที่: เกมมีแรงตรึงตำแหน่งของตัวเอง
+        local stationaryHold =
+            movementLock:FindFirstChildOfClass("AlignPosition")
+
+        if stationaryHold and stationaryHold.Enabled then
+            return false
+        end
+
+        local moving = false
+
+        -- ตรวจเฉพาะลูกโดยตรงของ Root ระหว่างใช้สกิล
+        for _, object in ipairs(root:GetChildren()) do
+            if object:IsA("AlignPosition")
+                and object.Enabled
+                and object ~= AlignPosition
+            then
+                local attachment = object.Attachment0
+
+                -- แยกแรงของ Auto Farm ด้วย Instance จริง
+                -- ครอบคลุมทั้ง Hover และ Flood Hold
+                if attachment
+                    and attachment ~= RootAttachment
+                    and attachment:IsDescendantOf(character)
+                then
+                    moving = true
+                    break
+                end
+            end
+        end
+
+        if not moving then
+            return false
+        end
+
+        if AlignPosition and AlignPosition.Parent then
+            AlignPosition.Enabled = false
+        end
+
+        if AlignOrientation and AlignOrientation.Parent then
+            AlignOrientation.Enabled = false
+        end
+
+        return true
     end
 
     --==================================================
@@ -8330,19 +8463,64 @@ do
                     + Vector3.new(0, clearance + 0.05, 0)
 
                 if (position - center).Magnitude <= 17 then
-                    RuntimeFix.FloodGroundStand = {
+                    local landing = {
                         Root = root,
                         Gate = gate,
                         Support = hit.Instance,
                         FloorY = hit.Position.Y,
                         Position = position,
+                        Landing = true,
                     }
+
+                    RuntimeFix.FloodGroundStand = landing
+                    local key = RuntimeFix.floodKey()
+
+                    local ok, arrived = pcall(
+                        RuntimeFix.tweenRootTo,
+                        CFrame.new(position) * root.CFrame.Rotation,
+                        function()
+                            local currentWater =
+                                workspace:GetAttribute("FloodLevel")
+
+                            return RuntimeFix.FloodGroundStand == landing
+                                and RuntimeFix.floodKey() == key
+                                and getCharacter() == character
+                                and getCharacterRoot() == root
+                                and gate.Parent ~= nil
+                                and hit.Instance.Parent ~= nil
+                                and workspace:GetAttribute("FloodLeverAt") == nil
+                                and type(currentWater) == "number"
+                                and hit.Position.Y > currentWater
+                                and root.Position.Y > currentWater
+                                and (position - gate.Position).Magnitude <= 17
+                        end
+                    )
+
+                    if RuntimeFix.FloodGroundStand ~= landing then
+                        return false
+                    end
+
+                    if not ok or not arrived then
+                        RuntimeFix.FloodGroundStand = nil
+
+                        RuntimeFix.floodStatus(
+                            "Hold Gate: Tween ไม่สำเร็จ / สถานะเปลี่ยน"
+                        )
+                        return false
+                    end
+
+                    landing.Landing = nil
+
+                    -- ถึงปลายทางแล้วจึงคืนการชนพื้น
+                    for part, original in pairs(collisionSaved) do
+                        if part.Parent
+                            and part:IsDescendantOf(character) then
+                            part.CanCollide = original
+                        end
+                    end
 
                     humanoid.AutoRotate = true
                     humanoid:Move(Vector3.zero, false)
-
-                    root.CFrame = CFrame.new(position)
-                        * root.CFrame.Rotation
 
                     root.AssemblyLinearVelocity = Vector3.zero
                     root.AssemblyAngularVelocity = Vector3.zero
@@ -8473,15 +8651,57 @@ do
             end
         end
 
+        local raw = workspace:GetAttribute("FloodLeverAt")
+        local target
+
+        if typeof(raw) == "Vector3" then
+            target = raw
+        elseif type(raw) == "string" then
+            local parts = string.split(raw, ",")
+
+            if #parts == 3 then
+                local x, y, z =
+                    tonumber(parts[1]),
+                    tonumber(parts[2]),
+                    tonumber(parts[3])
+
+                if x and y and z then
+                    target = Vector3.new(x, y, z)
+                end
+            end
+        end
+
+        if not map or not target
+            or target.X ~= target.X
+            or target.Y ~= target.Y
+            or target.Z ~= target.Z
+            or math.abs(target.X) == math.huge
+            or math.abs(target.Y) == math.huge
+            or math.abs(target.Z) == math.huge
+        then
+            return nil
+        end
+
+        local best, bestPosition
+        local bestDistance = 3 -- ค่าคลาดเคลื่อนของพิกัด ไม่ใช่ระยะกด
+
         for prompt in pairs(RuntimeFix.FloodPrompts or {}) do
             if not prompt:IsDescendantOf(map) then
                 RuntimeFix.FloodPrompts[prompt] = nil
             elseif prompt.Enabled then
-                return prompt
+                local position = RuntimeFix.floodPoint(prompt.Parent)
+                local distance = position
+                    and (position - target).Magnitude
+
+                if distance and distance <= bestDistance then
+                    best = prompt
+                    bestPosition = position
+                    bestDistance = distance
+                end
             end
         end
 
-        return nil
+        return best, raw, bestPosition
     end
 
     table.insert(AutoFarmSession.Cleanups, function()
@@ -8907,18 +9127,38 @@ do
 
         if workspace:GetAttribute("FloodLeverAt") ~= nil then
             local map = world and world:FindFirstChild("Map")
-            local prompt = RuntimeFix.floodLever(map)
+            local prompt, leverAt, position = RuntimeFix.floodLever(map)
 
-            local position = prompt
-                and RuntimeFix.floodPoint(prompt.Parent)
-
-            if not position then
+            if not prompt or not position then
                 RuntimeFix.floodStatus(
-                    label .. " | รอ Lever ที่ Enabled"
+                    label .. " | รอคันโยกที่ตรงกับ FloodLeverAt"
                 )
-
-                RuntimeFix.floodHold(root.Position)
+                stopHover()
                 return
+            end
+
+            local function isCurrentLever()
+                if AutoFarmSession.Cancelled
+                    or not AutoFarmEnabled
+                    or RuntimeFix.EndRoundPaused
+                    or getCharacterRoot() ~= root
+                    or not root.Parent
+                    or not humanoid.Parent
+                    or humanoid.Health <= 0
+                    or RuntimeFix.floodKey() ~= key
+                    or workspace:GetAttribute("FloodLeverAt") ~= leverAt
+                    or not map
+                    or not prompt:IsDescendantOf(map)
+                    or not prompt.Enabled
+                then
+                    return false
+                end
+
+                local currentPosition =
+                    RuntimeFix.floodPoint(prompt.Parent)
+
+                return currentPosition ~= nil
+                    and (currentPosition - position).Magnitude <= 0.5
             end
 
             local destination = RuntimeFix.floodSafe(
@@ -8926,32 +9166,55 @@ do
             )
 
             if (destination - position).Magnitude
-                >= prompt.MaxActivationDistance then
-
+                >= prompt.MaxActivationDistance
+            then
                 RuntimeFix.floodStatus(
                     label .. " | Lever อยู่ต่ำกว่าระยะปลอดภัยเหนือน้ำ"
                 )
-
-                RuntimeFix.floodHold(root.Position)
+                stopHover()
                 return
             end
 
-            RuntimeFix.floodStatus(label .. " | ดึง Lever")
+            RuntimeFix.floodStatus(
+                label .. " | ไปยังคันโยกเป้าหมาย"
+            )
+
+            -- ยกเลิก Tween ทันทีเมื่อเป้าหมายหรือชั้นเปลี่ยน
+            if (root.Position - destination).Magnitude > 3 then
+                stopHover()
+
+                if not RuntimeFix.tweenRootTo(
+                    CFrame.new(destination),
+                    isCurrentLever
+                ) then
+                    return
+                end
+            end
+
+            if not isCurrentLever() then
+                stopHover()
+                return
+            end
 
             if not RuntimeFix.floodHold(destination) then
                 return
             end
 
-            if not prompt.Enabled
-                or RuntimeFix.floodKey() ~= key
-                or workspace:GetAttribute("FloodLeverAt") == nil
+            if not isCurrentLever()
                 or (root.Position - position).Magnitude
-                    > prompt.MaxActivationDistance then
+                    > prompt.MaxActivationDistance
+            then
+                stopHover()
                 return
             end
 
-            if os.clock()
-                < (RuntimeFix.FloodLeverRetryAt or 0) then
+            -- เป้าหมายใหม่ไม่ต้องรอ Retry ของคันโยกเก่า
+            if RuntimeFix.FloodLeverRetryTarget ~= leverAt then
+                RuntimeFix.FloodLeverRetryTarget = leverAt
+                RuntimeFix.FloodLeverRetryAt = 0
+            end
+
+            if os.clock() < (RuntimeFix.FloodLeverRetryAt or 0) then
                 return
             end
 
@@ -8963,24 +9226,15 @@ do
             local usedNativeHold = false
 
             local ok, err = pcall(function()
-                if not prompt.Parent
-                    or not prompt.Enabled
-                    or AutoFarmSession.Cancelled
-                    or not AutoFarmEnabled
-                    or RuntimeFix.floodKey() ~= key
-                    or workspace:GetAttribute("FloodLeverAt") == nil
-                    or (root.Position - position).Magnitude
-                        > prompt.MaxActivationDistance then
+                if not isCurrentLever() then
                     return
                 end
 
-                -- เรียก Lever โดยตรง ไม่ต้องเล็งกล้องหรือกด E
                 if type(fireproximityprompt) == "function" then
                     fireproximityprompt(prompt)
                     return
                 end
 
-                -- วิธีเดิม เมื่อ Executor ไม่มี API โดยตรง
                 usedNativeHold = true
                 prompt:InputHoldBegin()
 
@@ -8988,15 +9242,10 @@ do
                     os.clock() + prompt.HoldDuration + 0.1
 
                 while os.clock() < deadline
-                    and prompt.Parent
-                    and prompt.Enabled
-                    and AutoFarmEnabled
-                    and not AutoFarmSession.Cancelled
-                    and RuntimeFix.floodKey() == key
-                    and workspace:GetAttribute("FloodLeverAt") ~= nil
+                    and isCurrentLever()
                     and (root.Position - position).Magnitude
-                        <= prompt.MaxActivationDistance do
-
+                        <= prompt.MaxActivationDistance
+                do
                     task.wait(0.05)
                 end
             end)
@@ -9013,9 +9262,11 @@ do
                 RuntimeFix.floodStatus(
                     "Lever input failed: " .. tostring(err)
                 )
+            elseif not isCurrentLever() then
+                stopHover()
             end
 
-            -- รอ Server ลบ FloodLeverAt เพื่อยืนยันผลจริง
+            -- รอ Server เปลี่ยนหรือลบ FloodLeverAt เพื่อยืนยันผล
             return
         end
 
@@ -9058,6 +9309,57 @@ do
         RuntimeFix.floodHold(destination)
     end
 
+    function RuntimeFix.repairFarmCamera()
+        if not AutoFarmEnabled
+            or AutoFarmSession.Cancelled
+            or RuntimeFix.EndRoundPaused
+            or PlayerGui:GetAttribute("EndScreenActive") == true
+        then
+            return
+        end
+
+        local camera = workspace.CurrentCamera
+        local character = getCharacter()
+        local humanoid = getHumanoid()
+
+        if not camera
+            or not character
+            or not humanoid
+            or humanoid.Parent ~= character
+            or humanoid.Health <= 0
+        then
+            return
+        end
+
+        -- ปล่อยกล้องสกิล / คัตซีนให้ระบบเกมควบคุม
+        if camera.CameraType ~= Enum.CameraType.Custom then
+            return
+        end
+
+        local subject = camera.CameraSubject
+        local previousHumanoid = RuntimeFix.CameraHumanoid
+
+        -- ซ่อมเฉพาะเป้าหมายที่หายไป หรือ Humanoid เก่า
+        local needsRepair = not subject
+            or not subject.Parent
+            or (
+                subject ~= humanoid
+                and (
+                    subject == previousHumanoid
+                    or (
+                        subject:IsA("Humanoid")
+                        and subject.Health <= 0
+                    )
+                )
+            )
+
+        RuntimeFix.CameraHumanoid = humanoid
+
+        if needsRepair then
+            camera.CameraSubject = humanoid
+        end
+    end
+
     local function StartAutoFarm()
         if AutoFarmEnabled then
             return
@@ -9081,6 +9383,8 @@ do
                 return
             end
             local char = getCharacter()
+
+            RuntimeFix.repairFarmCamera()
 
             -- ตรวจน้ำระหว่างเดินทางด้วย ไม่ใช่เฉพาะปลายทาง
             if RuntimeFix.isFlood()
@@ -9113,7 +9417,8 @@ do
 
                 for _, v in ipairs(char:GetDescendants()) do
                     if v:IsA("BasePart") then
-                        if RuntimeFix.FloodGroundStand then
+                        if RuntimeFix.FloodGroundStand
+                            and not RuntimeFix.FloodGroundStand.Landing then
                             local original = collisionSaved[v]
 
                             if original ~= nil then
@@ -9158,6 +9463,12 @@ do
                     LastTeleportedArea = nil
 
                     task.wait(0.2)
+                    continue
+                end
+
+                -- รอให้สกิลจบก่อนเปลี่ยนเป้าหมายหรือเดินทางต่อ
+                if isGameSkillBusy() then
+                    task.wait(0.05)
                     continue
                 end
 
