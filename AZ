@@ -3693,7 +3693,43 @@ RuntimeFix.FarmOptions = {
         return hitPosition + Vector3.new(0, AREA_HEIGHT_OFFSET, 0)
     end
 
+    function RuntimeFix.hasActiveRubbleTask()
+        local rubble = CurrentRubble
+
+        if not RubbleModeActive
+            or CurrentRubbleArea == nil
+            or not rubble
+            or not rubble.Parent
+        then
+            return false
+        end
+
+        local liveArea = getLiveFarmArea()
+
+        if liveArea ~= nil
+            and liveArea ~= tostring(CurrentRubbleArea)
+        then
+            return false
+        end
+
+        local health = tonumber(
+            rubble.Parent:GetAttribute("RubbleHealth")
+        )
+
+        return health == nil or health > 0
+    end
+
     local function holdStillWhileWaiting(areaName)
+        if RuntimeFix.hasActiveRubbleTask()
+            or (
+                EnemyCountLabel
+                and EnemyCountLabel.Text
+                    == "Break the rubble to continue!"
+            )
+        then
+            return false
+        end
+
         if AutoFarmSession.Cancelled or not AutoFarmEnabled then
             return false
         end
@@ -3733,20 +3769,14 @@ RuntimeFix.FarmOptions = {
 
         RuntimeFix.WaitingAreaMissing = nil
 
-        local now = os.clock()
         local waiting = RuntimeFix.WaitingStand
-
-        local repeatTeleportSeconds = 1
 
         if waiting
             and waiting.Root == root
             and waiting.Area == areaKey
-            and now - waiting.LastTeleportAt < repeatTeleportSeconds
         then
             return true
         end
-
-        -- ครบเวลาแล้วทำขั้นตอนวาร์ปกลาง Area ด้านล่างอีกครั้ง
 
         stopHover()
 
@@ -3774,6 +3804,9 @@ RuntimeFix.FarmOptions = {
                     and tostring(CurrentAreaName) == areaKey
                     and not RuntimeFix.EndRoundPaused
                     and getNearestEnemyInArea(areaKey) == nil
+                    and not RuntimeFix.hasActiveRubbleTask()
+                    and EnemyCountLabel.Text
+                        ~= "Break the rubble to continue!"
             end
         )
 
@@ -4360,6 +4393,16 @@ RuntimeFix.FarmOptions = {
     --==================================================
 
     local function teleportToArea(areaName)
+        if RuntimeFix.hasActiveRubbleTask()
+            or (
+                EnemyCountLabel
+                and EnemyCountLabel.Text
+                    == "Break the rubble to continue!"
+            )
+        then
+            return false
+        end
+
         local area = getAreaPart(areaName)
         local character = getCharacter()
 
@@ -4397,6 +4440,9 @@ RuntimeFix.FarmOptions = {
                     and getLiveFarmArea() == areaKey
                     and not RuntimeFix.EndRoundPaused
                     and not hasEnemy()
+                    and not RuntimeFix.hasActiveRubbleTask()
+                    and EnemyCountLabel.Text
+                        ~= "Break the rubble to continue!"
             end
         )
 
@@ -4622,6 +4668,8 @@ RuntimeFix.FarmOptions = {
         local character = getCharacter()
         local root = getCharacterRoot()
         local humanoid = getHumanoid()
+        local areaKey = tostring(areaName)
+        local generation = RuntimeFix.FarmGeneration
 
         if AutoFarmSession.Cancelled
             or not AutoFarmEnabled
@@ -4635,35 +4683,47 @@ RuntimeFix.FarmOptions = {
             return false
         end
 
-        local targetCFrame =
-            getRubbleBehindCFrame(rubble, areaName)
-
+        local targetCFrame = getRubbleBehindCFrame(rubble, areaName)
         if not targetCFrame then
-            warn("[AutoFarm] Rubble FRONT position unavailable")
             return false
         end
 
         stopHover()
 
-        local UPDATE_INTERVAL = 0.1
-        local MAX_DRIFT = 3
-        local HEIGHT_STRENGTH = 16
-        local HEIGHT_DAMPING = 8
+        -- จองงานก่อน Tween เพื่อกันงานเก่ากลับมาสร้างแรงพยุง
+        local token = {}
+        RuntimeFix.RubbleRepeatToken = token
+
+        local function isCurrent()
+            local liveArea = getLiveFarmArea()
+
+            return RuntimeFix.RubbleRepeatToken == token
+                and RuntimeFix.FarmGeneration == generation
+                and not AutoFarmSession.Cancelled
+                and AutoFarmEnabled
+                and RubbleModeActive
+                and not RuntimeFix.EndRoundPaused
+                and CurrentRubble == rubble
+                and tostring(CurrentRubbleArea) == areaKey
+                and (liveArea == nil or liveArea == areaKey)
+                and getCharacter() == character
+                and getCharacterRoot() == root
+                and root.Parent ~= nil
+                and humanoid.Parent == character
+                and humanoid.Health > 0
+                and not RuntimeFix.isRubbleBroken(rubble)
+        end
 
         root.Anchored = false
         humanoid.AutoRotate = false
 
-        local targetPosition = targetCFrame.Position
+        local arrived = RuntimeFix.tweenRootTo(targetCFrame, isCurrent)
 
-        local arrived = RuntimeFix.tweenRootTo(
-            targetCFrame,
-            function()
-                return RubbleModeActive
-                    and not RuntimeFix.isRubbleBroken(rubble)
+        if not arrived or not isCurrent() then
+            if RuntimeFix.RubbleRepeatToken == token then
+                RuntimeFix.RubbleRepeatToken = nil
+                humanoid.AutoRotate = true
             end
-        )
-
-        if not arrived then
             return false
         end
 
@@ -4684,44 +4744,33 @@ RuntimeFix.FarmOptions = {
         RuntimeFix.RubbleFloatAttachment = attachment
         RuntimeFix.RubbleFloatForce = force
 
-        local token = {}
-        RuntimeFix.RubbleRepeatToken = token
-
         RuntimeFix.spawnFarmTask(function()
             local ok, err = pcall(function()
-                while RuntimeFix.RubbleRepeatToken == token
-                    and not AutoFarmSession.Cancelled
-                    and AutoFarmEnabled
-                    and RubbleModeActive
-                    and not RuntimeFix.EndRoundPaused
-                    and getCharacter() == character
-                    and character.Parent
-                    and root.Parent
-                    and humanoid.Parent
-                    and humanoid.Health > 0
-                    and force.Parent
-                    and attachment.Parent
-                    and not RuntimeFix.isRubbleBroken(rubble)
-                do
-                    local mass = root.AssemblyMass
-
-                    if root.Anchored
-                        or mass <= 0
-                        or mass == math.huge
+                while isCurrent() and force.Parent and attachment.Parent do
+                    -- ไม่ใช้แรงพยุงแย่งกับ Tween หรือสกิลเคลื่อนที่
+                    if RuntimeFix.ActiveRootTween
+                        or RuntimeFix.pauseFarmForSkill()
                     then
-                        error("Character assembly is anchored or has invalid mass")
+                        force.Enabled = false
+                        task.wait(0.1)
+                        continue
                     end
 
-                    -- พยุงเฉพาะแนวตั้ง พร้อมลดการแกว่ง
-                    local heightError =
-                        targetPosition.Y - root.Position.Y
+                    -- หลุดจุดตี: จบงานนี้ ให้ลูปหลักตัดสินใจใหม่
+                    -- ห้ามสร้าง Tween กลับจากลูปเบื้องหลัง
+                    if (root.Position - targetCFrame.Position).Magnitude > 3 then
+                        break
+                    end
 
-                    local verticalSpeed =
-                        root.AssemblyLinearVelocity.Y
+                    local mass = root.AssemblyMass
+
+                    if root.Anchored or mass <= 0 or mass == math.huge then
+                        break
+                    end
 
                     local correction = math.clamp(
-                        heightError * HEIGHT_STRENGTH
-                            - verticalSpeed * HEIGHT_DAMPING,
+                        (targetCFrame.Position.Y - root.Position.Y) * 16
+                            - root.AssemblyLinearVelocity.Y * 8,
                         -workspace.Gravity,
                         workspace.Gravity
                     )
@@ -4732,64 +4781,33 @@ RuntimeFix.FarmOptions = {
                         0
                     )
 
-                    -- ไม่วาร์ปซ้ำถ้ายังอยู่ใกล้จุดตี
-                    if (root.Position - targetPosition).Magnitude > MAX_DRIFT then
-                        local returned = RuntimeFix.tweenRootTo(
-                            targetCFrame,
-                            function()
-                                return RuntimeFix.RubbleRepeatToken == token
-                                    and RubbleModeActive
-                                    and not RuntimeFix.isRubbleBroken(rubble)
-                            end
-                        )
-
-                        if not returned then
-                            -- หยุดเฉพาะเมื่อเป้าหมายหรืองานเดิมสิ้นสุดแล้ว
-                            if RuntimeFix.RubbleRepeatToken ~= token
-                                or AutoFarmSession.Cancelled
-                                or not AutoFarmEnabled
-                                or not RubbleModeActive
-                                or RuntimeFix.EndRoundPaused
-                                or getCharacter() ~= character
-                                or not root.Parent
-                                or not humanoid.Parent
-                                or humanoid.Health <= 0
-                                or RuntimeFix.isRubbleBroken(rubble)
-                            then
-                                break
-                            end
-
-                            -- หินยังไม่พัง: พักแล้วลอง Tween กลับจุดเดิมอีกครั้ง
-                            warn("[AutoFarm] Rubble return incomplete -> retry")
-                            task.wait(0.5)
-                        end
-                    end
-
-                    task.wait(UPDATE_INTERVAL)
+                    force.Enabled = true
+                    task.wait(0.1)
                 end
             end)
 
-            -- Cleanup เฉพาะลูปที่ยังเป็นเจ้าของงาน
-            if RuntimeFix.RubbleRepeatToken == token then
-                stopHover()
+            -- ล้างเฉพาะอุปกรณ์ของงานนี้
+            -- ไม่เรียก stopHover() ไปยกเลิก Tween ของงานใหม่
+            force:Destroy()
+            attachment:Destroy()
 
-                -- เปิดทางให้ลูปฟาร์มเริ่ม Hover ใหม่เมื่อระบบพยุงหยุด
-                if CurrentRubble == rubble
-                    and CurrentRubbleArea == tostring(areaName)
-                then
-                    RubbleTeleported = false
-                end
+            if RuntimeFix.RubbleFloatForce == force then
+                RuntimeFix.RubbleFloatForce = nil
+            end
+
+            if RuntimeFix.RubbleFloatAttachment == attachment then
+                RuntimeFix.RubbleFloatAttachment = nil
+            end
+
+            if RuntimeFix.RubbleRepeatToken == token then
+                RuntimeFix.RubbleRepeatToken = nil
+                RubbleTeleported = false
             end
 
             if not ok then
                 warn("[AutoFarm] Rubble float failed:", err)
             end
         end)
-
-        print(
-            "[AutoFarm] Rubble smooth float started | Area:",
-            tostring(areaName)
-        )
 
         return true
     end
@@ -5123,44 +5141,39 @@ RuntimeFix.FarmOptions = {
         local root = getCharacterRoot()
         local humanoid = getHumanoid()
 
-        if not character
-            or not root
-            or not humanoid
+        if not character or not root or not humanoid
+            or humanoid.Parent ~= character
             or humanoid.Health <= 0
         then
             return false
         end
 
+        local camera = workspace.CurrentCamera
+        local moving = camera ~= nil
+            and camera.CameraType == Enum.CameraType.Scriptable
+
         local movementLock =
             root:FindFirstChild("SkillMovementLock")
 
-        -- มีแรงตรึงตำแหน่งของเกม จึงถือเป็นสกิลอยู่กับที่
-        if movementLock and movementLock:IsA("Attachment") then
-            local stationaryHold =
-                movementLock:FindFirstChildOfClass("AlignPosition")
-
-            if stationaryHold and stationaryHold.Enabled then
-                return false
-            end
-        end
-
-        -- ไม่มี SkillMovementLock ก็ต้องตรวจ Mover ต่อ
-        -- เพราะสกิลพุ่งที่ใช้ holdPosition=false อาจไม่สร้าง Attachment นี้
-
-        local moving = false
-
-        -- ตรวจเฉพาะลูกโดยตรงของ Root ระหว่างใช้สกิล
         for _, object in ipairs(root:GetChildren()) do
-            if object:IsA("AlignPosition")
+            if object:IsA("LinearVelocity") and object.Enabled then
+                local attachment = object.Attachment0
+
+                if attachment
+                    and attachment:IsDescendantOf(character)
+                then
+                    moving = true
+                    break
+                end
+            elseif object:IsA("AlignPosition")
                 and object.Enabled
                 and object ~= AlignPosition
             then
                 local attachment = object.Attachment0
 
-                -- แยกแรงของ Auto Farm ด้วย Instance จริง
-                -- ครอบคลุมทั้ง Hover และ Flood Hold
                 if attachment
                     and attachment ~= RootAttachment
+                    and attachment ~= movementLock
                     and attachment:IsDescendantOf(character)
                 then
                     moving = true
@@ -5181,6 +5194,12 @@ RuntimeFix.FarmOptions = {
             AlignOrientation.Enabled = false
         end
 
+        local force = RuntimeFix.RubbleFloatForce
+
+        if force and force.Parent then
+            force.Enabled = false
+        end
+
         return true
     end
 
@@ -5191,6 +5210,7 @@ RuntimeFix.FarmOptions = {
             or PlayerGui:GetAttribute("EndScreenActive") == true
             or isGameSkillBusy()
         then
+            RuntimeFix.FarmCameraRecovery = nil
             return
         end
 
@@ -5198,35 +5218,43 @@ RuntimeFix.FarmOptions = {
         local character = getCharacter()
         local humanoid = getHumanoid()
 
-        if not camera
-            or not character
-            or not humanoid
+        if not camera or not character or not humanoid
             or humanoid.Parent ~= character
             or humanoid.Health <= 0
-            or camera.CameraType ~= Enum.CameraType.Custom
         then
+            RuntimeFix.FarmCameraRecovery = nil
             return
         end
 
-        local subject = camera.CameraSubject
-        local previous = RuntimeFix.FarmCameraHumanoid
+        if camera.CameraType == Enum.CameraType.Scriptable then
+            local recovery = RuntimeFix.FarmCameraRecovery
 
-        RuntimeFix.FarmCameraHumanoid = humanoid
+            if not recovery
+                or recovery.Camera ~= camera
+                or recovery.Humanoid ~= humanoid
+            then
+                RuntimeFix.FarmCameraRecovery = {
+                    Camera = camera,
+                    Humanoid = humanoid,
+                    IdleSince = os.clock(),
+                }
 
-        local needsRepair = not subject
-            or not subject.Parent
-            or (
-                subject ~= humanoid
-                and (
-                    subject == previous
-                    or (
-                        subject:IsA("Humanoid")
-                        and subject.Health <= 0
-                    )
-                )
-            )
+                return
+            end
 
-        if needsRepair then
+            if os.clock() - recovery.IdleSince < 1 then
+                return
+            end
+
+            camera.CameraSubject = humanoid
+            camera.CameraType = Enum.CameraType.Custom
+        end
+
+        RuntimeFix.FarmCameraRecovery = nil
+
+        if camera.CameraType == Enum.CameraType.Custom
+            and camera.CameraSubject ~= humanoid
+        then
             camera.CameraSubject = humanoid
         end
     end
@@ -13659,9 +13687,14 @@ end)
                     LastLoggedStatus = status
                 end
 
-                if status == "Break the rubble to continue!" then
+                local liveArea = getLiveFarmArea()
+
+                local keepRubble =
+                    RuntimeFix.hasActiveRubbleTask()
+
+                if status == "Break the rubble to continue!" or keepRubble then
                     local areaName =
-                        CurrentAreaName or getCurrentArea()
+                        liveArea or CurrentAreaName or getCurrentArea()
 
                     local rubble = CurrentRubble
 
