@@ -928,6 +928,7 @@ end
             "MonarchPathConfig",
             "accessoryConfig",
             "accessoryCraftConfig",
+            "unitCraftConfig",
             "materialDropConfig",
             "economyConfig",
             "characterRollConfig",
@@ -1324,12 +1325,21 @@ end
         local candidates = {}
         local reachable = {}
 
-        for _, map in ipairs({
+        local maps = {
             "hxh",
             "spiritedawayraid",
             "sololevelingraid",
-            allowedMaps and allowedMaps.fateraid and "fateraid" or nil,
-        }) do
+        }
+
+        if allowedMaps and allowedMaps.fateraid then
+            table.insert(maps, "fateraid")
+        end
+
+        if allowedMaps and allowedMaps.floodescape then
+            table.insert(maps, "floodescape")
+        end
+
+        for _, map in ipairs(maps) do
             if not allowedMaps or allowedMaps[map] then
                 local chapters = tables[map]
 
@@ -1373,7 +1383,8 @@ end
                     if coverage > 0 then
                         table.insert(candidates, {
                             Map = map,
-                            Chapter = chapter,
+                            Chapter = map == "floodescape"
+                                and 0 or chapter,
                             Difficulty = map == "hxh"
                                 and difficulty
                                 or 4,
@@ -1733,6 +1744,7 @@ end
         if payload.gamemode ~= "Story"
             and payload.gamemode ~= "Raid"
             and payload.gamemode ~= "Trials"
+            and payload.gamemode ~= "Escape"
         then
             error("Unsupported queue mode: " .. tostring(payload.gamemode))
         end
@@ -1749,7 +1761,17 @@ end
             end
 
             request.chapter = 0
-            request.difficulty = 1
+            request.difficulty = 4
+
+        elseif request.gamemode == "Escape" then
+            if request.map ~= "Flood" then
+                error("Invalid Escape map: " .. tostring(request.map))
+            end
+
+            request.chapter = 0
+            request.floor = 0
+            request.difficulty = 4
+
         else
             request.floor = 0
 
@@ -3260,6 +3282,9 @@ RuntimeFix.FarmOptions = {
     RuntimeFix.TravelSpeed = 80 -- studs ต่อวินาที
 
     function RuntimeFix.tweenRootTo(targetCFrame, canContinue)
+        if RuntimeFix.pauseFarmForSkill() then
+            return false
+        end
         local character = getCharacter()
         local root = getCharacterRoot()
         local humanoid = getHumanoid()
@@ -3407,7 +3432,9 @@ RuntimeFix.FarmOptions = {
                 and humanoid.Health > 0
                 and os.clock() < deadline
             do
-                if canContinue and not canContinue() then
+                if RuntimeFix.pauseFarmForSkill()
+                    or (canContinue and not canContinue())
+                then
                     break
                 end
 
@@ -3528,6 +3555,112 @@ RuntimeFix.FarmOptions = {
         end
     end
 
+    function RuntimeFix.getAreaTravelPosition(area)
+        if not area
+            or not area:IsA("BasePart")
+            or not area:IsDescendantOf(workspace)
+        then
+            return nil
+        end
+
+        -- คงพฤติกรรมโหมดอื่น
+        if workspace:GetAttribute("Mode") ~= "hxh" then
+            return area.Position
+                + Vector3.new(0, AREA_HEIGHT_OFFSET, 0)
+        end
+
+        local now = os.clock()
+        local cached = RuntimeFix.HxhAreaGroundCache
+        local hitPosition
+
+        if cached
+            and cached.Area == area
+            and cached.AreaCFrame == area.CFrame
+            and cached.AreaSize == area.Size
+            and cached.Floor:IsDescendantOf(workspace)
+            and cached.Floor.CanCollide
+            and cached.Floor.CFrame == cached.FloorCFrame
+            and now < cached.ExpiresAt
+        then
+            hitPosition = cached.Position
+        else
+            local filter = { area }
+
+            if AreasFolder then
+                table.insert(filter, AreasFolder)
+            end
+
+            local enemies = workspace:FindFirstChild("enemies")
+
+            if enemies then
+                table.insert(filter, enemies)
+            end
+
+            for _, player in ipairs(Players:GetPlayers()) do
+                if player.Character then
+                    table.insert(filter, player.Character)
+                end
+            end
+
+            local params = RaycastParams.new()
+            params.FilterType = Enum.RaycastFilterType.Exclude
+            params.FilterDescendantsInstances = filter
+            params.RespectCanCollide = true
+            params.IgnoreWater = true
+
+            -- ระยะสูงของกล่องในแกนโลก รองรับ Area ที่หมุนอยู่
+            local cf = area.CFrame
+            local size = area.Size
+
+            local halfHeight = (
+                math.abs(cf.RightVector.Y) * size.X
+                + math.abs(cf.UpVector.Y) * size.Y
+                + math.abs(cf.LookVector.Y) * size.Z
+            ) * 0.5
+
+            local rayHeight = halfHeight + AREA_HEIGHT_OFFSET
+
+            local hit = workspace:Raycast(
+                area.Position + Vector3.new(0, rayHeight, 0),
+                Vector3.new(0, -rayHeight * 2, 0),
+                params
+            )
+
+            if not hit
+                or not hit.Instance:IsA("BasePart")
+                or not hit.Instance.CanCollide
+                or hit.Normal.Y < 0.5
+            then
+                RuntimeFix.HxhAreaGroundCache = nil
+
+                if RuntimeFix.HxhAreaGroundIssue ~= area then
+                    RuntimeFix.HxhAreaGroundIssue = area
+                    AutoSkillWarn(
+                        "[AutoFarm] HxH floor unavailable below "
+                            .. area:GetFullName()
+                    )
+                end
+
+                return nil
+            end
+
+            hitPosition = hit.Position
+            RuntimeFix.HxhAreaGroundIssue = nil
+
+            RuntimeFix.HxhAreaGroundCache = {
+                Area = area,
+                AreaCFrame = area.CFrame,
+                AreaSize = area.Size,
+                Floor = hit.Instance,
+                FloorCFrame = hit.Instance.CFrame,
+                Position = hitPosition,
+                ExpiresAt = now + 2,
+            }
+        end
+
+        return hitPosition + Vector3.new(0, AREA_HEIGHT_OFFSET, 0)
+    end
+
     local function holdStillWhileWaiting(areaName)
         if AutoFarmSession.Cancelled or not AutoFarmEnabled then
             return false
@@ -3587,7 +3720,11 @@ RuntimeFix.FarmOptions = {
 
         local wasCanCollide = root.CanCollide
         local targetPosition =
-            areaPart.Position + Vector3.new(0, AREA_HEIGHT_OFFSET, 0)
+            RuntimeFix.getAreaTravelPosition(areaPart)
+
+        if not targetPosition then
+            return false
+        end
 
         humanoid:Move(Vector3.zero, false)
         humanoid.AutoRotate = true
@@ -3643,6 +3780,9 @@ RuntimeFix.FarmOptions = {
     --==================================================
 
     local function startHover(enemy, hoverHeight, retreatMode)
+        if RuntimeFix.pauseFarmForSkill() then
+            return false
+        end
         local character = getCharacter()
         local root = getCharacterRoot()
         local humanoid = getHumanoid()
@@ -4000,6 +4140,19 @@ RuntimeFix.FarmOptions = {
                 return
             end
 
+            -- ระหว่างสกิล ไม่ดึงตำแหน่ง ไม่บังคับทิศ
+            -- และไม่ดึงตัวละครกลับเข้าเขต Gate
+            if not AutoFarmSession.Cancelled
+                and AutoFarmEnabled
+                and getCharacter() == character
+                and root.Parent
+                and humanoid.Parent
+                and humanoid.Health > 0
+                and RuntimeFix.pauseFarmForSkill()
+            then
+                return
+            end
+
             if (
                 floodContext
                 and RuntimeFix.floodKey() ~= floodContext
@@ -4079,13 +4232,55 @@ RuntimeFix.FarmOptions = {
                 end
             end
 
+            local facing = getFacing(root.Position, center)
+            local trackingStationary = false
+
+            if usingSkill then
+                local movementLock =
+                    root:FindFirstChild("SkillMovementLock")
+
+                if movementLock and movementLock:IsA("Attachment") then
+                    local gamePosition =
+                        movementLock:FindFirstChildOfClass("AlignPosition")
+
+                    -- ใช้เฉพาะแรงตรึงตำแหน่งของสกิลตามโครงสร้างที่ตรวจพบ
+                    if gamePosition
+                        and gamePosition.Enabled
+                        and gamePosition.Mode
+                            == Enum.PositionAlignmentMode.OneAttachment
+                        and gamePosition.Attachment0 == movementLock
+                    then
+                        -- ให้แรงของเกมและ Auto Farm ไปยังจุดเดียวกัน
+                        gamePosition.Position = targetPosition
+                        trackingStationary = true
+
+                        local gameOrientation =
+                            movementLock:FindFirstChildOfClass(
+                                "AlignOrientation"
+                            )
+
+                        if gameOrientation
+                            and gameOrientation.Enabled
+                            and gameOrientation.Mode
+                                == Enum.OrientationAlignmentMode.OneAttachment
+                            and gameOrientation.Attachment0 == movementLock
+                        then
+                            gameOrientation.CFrame = facing
+                        end
+                    end
+                end
+            end
+
             positionAlign.Position = targetPosition
+            positionAlign.Enabled = true
 
-            -- ระหว่างใช้สกิล ปล่อยให้ระบบ Aim ของเกมควบคุมทิศ
-            orientationAlign.Enabled = not aimLocked
+            -- สกิลอยู่กับที่ให้หันตามมอนด้วย
+            -- ส่วนช่วงพุ่งถูกพักโดย pauseFarmForSkill() ก่อนถึงบล็อกนี้
+            orientationAlign.Enabled =
+                trackingStationary or not aimLocked
 
-            if not aimLocked then
-                orientationAlign.CFrame = getFacing(root.Position, center)
+            if orientationAlign.Enabled then
+                orientationAlign.CFrame = facing
             end
 
             root.AssemblyAngularVelocity = Vector3.zero
@@ -4145,7 +4340,11 @@ RuntimeFix.FarmOptions = {
         end
 
         local targetPosition =
-            area.Position + Vector3.new(0, AREA_HEIGHT_OFFSET, 0)
+            RuntimeFix.getAreaTravelPosition(area)
+
+        if not targetPosition then
+            return false
+        end
 
         local arrived = RuntimeFix.tweenRootTo(
             CFrame.new(targetPosition),
@@ -4866,6 +5065,126 @@ RuntimeFix.FarmOptions = {
         end)
 
         return ok and busy == true
+    end
+
+    function RuntimeFix.pauseFarmForSkill()
+        if AutoFarmSession.Cancelled
+            or not AutoFarmEnabled
+            or not isGameSkillBusy()
+        then
+            return false
+        end
+
+        local character = getCharacter()
+        local root = getCharacterRoot()
+        local humanoid = getHumanoid()
+
+        if not character
+            or not root
+            or not humanoid
+            or humanoid.Health <= 0
+        then
+            return false
+        end
+
+        local movementLock = root:FindFirstChild("SkillMovementLock")
+
+        if not movementLock
+            or not movementLock:IsA("Attachment")
+        then
+            return false
+        end
+
+        -- สกิลอยู่กับที่: เกมมีแรงตรึงตำแหน่งของตัวเอง
+        local stationaryHold =
+            movementLock:FindFirstChildOfClass("AlignPosition")
+
+        if stationaryHold and stationaryHold.Enabled then
+            return false
+        end
+
+        local moving = false
+
+        -- ตรวจเฉพาะลูกโดยตรงของ Root ระหว่างใช้สกิล
+        for _, object in ipairs(root:GetChildren()) do
+            if object:IsA("AlignPosition")
+                and object.Enabled
+                and object ~= AlignPosition
+            then
+                local attachment = object.Attachment0
+
+                -- แยกแรงของ Auto Farm ด้วย Instance จริง
+                -- ครอบคลุมทั้ง Hover และ Flood Hold
+                if attachment
+                    and attachment ~= RootAttachment
+                    and attachment:IsDescendantOf(character)
+                then
+                    moving = true
+                    break
+                end
+            end
+        end
+
+        if not moving then
+            return false
+        end
+
+        if AlignPosition and AlignPosition.Parent then
+            AlignPosition.Enabled = false
+        end
+
+        if AlignOrientation and AlignOrientation.Parent then
+            AlignOrientation.Enabled = false
+        end
+
+        return true
+    end
+
+    function RuntimeFix.repairFarmCamera()
+        if not AutoFarmEnabled
+            or AutoFarmSession.Cancelled
+            or RuntimeFix.EndRoundPaused
+            or PlayerGui:GetAttribute("EndScreenActive") == true
+            or isGameSkillBusy()
+        then
+            return
+        end
+
+        local camera = workspace.CurrentCamera
+        local character = getCharacter()
+        local humanoid = getHumanoid()
+
+        if not camera
+            or not character
+            or not humanoid
+            or humanoid.Parent ~= character
+            or humanoid.Health <= 0
+            or camera.CameraType ~= Enum.CameraType.Custom
+        then
+            return
+        end
+
+        local subject = camera.CameraSubject
+        local previous = RuntimeFix.FarmCameraHumanoid
+
+        RuntimeFix.FarmCameraHumanoid = humanoid
+
+        local needsRepair = not subject
+            or not subject.Parent
+            or (
+                subject ~= humanoid
+                and (
+                    subject == previous
+                    or (
+                        subject:IsA("Humanoid")
+                        and subject.Health <= 0
+                    )
+                )
+            )
+
+        if needsRepair then
+            camera.CameraSubject = humanoid
+        end
     end
 
     --==================================================
@@ -6931,8 +7250,44 @@ RuntimeFix.FarmOptions = {
     --==================================================
 
     function RuntimeFix.floodStatus(message)
-        -- เก็บสถานะภายใน โดยไม่แสดงใน UI
         RuntimeFix.FloodMessage = message
+
+        local eventAt = workspace:GetAttribute("FloodLeverAt")
+
+        if eventAt == nil then
+            return
+        end
+
+        local changed =
+            RuntimeFix.FloodLeverLogEvent ~= eventAt
+            or RuntimeFix.FloodLeverLogMessage ~= message
+
+        local now = os.clock()
+
+        if not changed
+            or now < (RuntimeFix.FloodLeverLogNextAt or 0)
+        then
+            return
+        end
+
+        RuntimeFix.FloodLeverLogEvent = eventAt
+        RuntimeFix.FloodLeverLogMessage = message
+        RuntimeFix.FloodLeverLogNextAt = now + 3
+
+        local root = getCharacterRoot()
+
+        AutoSkillWarn(string.format(
+            "[FloodLever] %s"
+                .. " | Floor=%s Phase=%s Roof=%s"
+                .. " LeverAt=%s Water=%s Root=%s",
+            tostring(message),
+            tostring(workspace:GetAttribute("FloodFloor")),
+            tostring(workspace:GetAttribute("FloodPhase")),
+            tostring(workspace:GetAttribute("FloodRoof")),
+            tostring(eventAt),
+            tostring(workspace:GetAttribute("FloodLevel")),
+            tostring(root and root.Position)
+        ))
     end
 
     function RuntimeFix.isFlood()
@@ -6945,7 +7300,202 @@ RuntimeFix.FarmOptions = {
             .. tostring(workspace:GetAttribute("FloodPhase"))
     end
 
+    function RuntimeFix.floodGateContains(position, gate)
+        if not gate or not gate.Parent or not gate:IsA("BasePart") then
+            return false
+        end
+
+        local offset = position
+            - (gate.Position - Vector3.new(0, 0.15, 0))
+
+        local x = math.abs(offset.X)
+        local z = math.abs(offset.Z)
+
+        return x <= 18
+            and z <= 18
+            and x + z <= 18 * 1.8
+            and math.abs(offset.Y - 3) < 8
+    end
+
+    function RuntimeFix.isFloodGateStanding()
+        local waiting = RuntimeFix.WaitingStand
+
+        return AutoFarmEnabled
+            and not AutoFarmSession.Cancelled
+            and RuntimeFix.isFlood()
+            and workspace:GetAttribute("FloodPhase") == "block"
+            and workspace:GetAttribute("FloodRoof") ~= true
+            and workspace:GetAttribute("FloodLeverAt") == nil
+            and waiting ~= nil
+            and waiting.Gate ~= nil
+            and waiting.Gate:IsDescendantOf(workspace)
+            and waiting.Root == getCharacterRoot()
+            and waiting.Key == RuntimeFix.floodKey()
+    end
+
+    function RuntimeFix.standOnFloodGate(gate)
+        local character = getCharacter()
+        local root = getCharacterRoot()
+        local humanoid = getHumanoid()
+
+        if AutoFarmSession.Cancelled
+            or not AutoFarmEnabled
+            or not character
+            or not root
+            or not root:IsA("BasePart")
+            or not humanoid
+            or humanoid.Health <= 0
+            or not gate
+            or not gate:IsA("BasePart")
+            or not gate:IsDescendantOf(workspace)
+        then
+            return false
+        end
+
+        local key = RuntimeFix.floodKey()
+        local waiting = RuntimeFix.WaitingStand
+
+        if not RuntimeFix.isFloodGateStanding()
+            or waiting.Gate ~= gate
+            or HoverConnection
+            or AlignPosition
+            or AlignOrientation
+            or RuntimeFix.ActiveRootTween
+            or RuntimeFix.RubbleFloatForce
+        then
+            stopHover()
+            RuntimeFix.rememberFarmCharacter(character)
+
+            waiting = {
+                Root = root,
+                WasCanCollide = root.CanCollide,
+                Gate = gate,
+                Key = key,
+                NextFloorCheck = 0,
+            }
+
+            RuntimeFix.WaitingStand = waiting
+        end
+
+        -- คืน Collision ของร่างตามค่าที่ระบบเดิมบันทึกไว้
+        for part, original in pairs(
+            RuntimeFix.FarmCollisionSaved or {}
+        ) do
+            if part:IsDescendantOf(character) then
+                part.CanCollide = original
+            end
+        end
+
+        root.CanCollide = true
+        humanoid:Move(Vector3.zero, false)
+
+        if root.Anchored then
+            error("Hold Gate: character root is anchored")
+        end
+
+        local clearance = humanoid.HipHeight + root.Size.Y * 0.5
+
+        if humanoid.RigType == Enum.HumanoidRigType.R6 then
+            -- ชื่อขามาตรฐานของ R6; ต้องมี Instance จริงก่อนใช้
+            local leg = character:FindFirstChild("Left Leg")
+
+            if not leg or not leg:IsA("BasePart") then
+                error("Hold Gate: R6 Left Leg unavailable")
+            end
+
+            clearance += leg.Size.Y
+        end
+
+        local now = os.clock()
+        local floorPart = waiting.Floor
+
+        if now >= waiting.NextFloorCheck
+            or not floorPart
+            or not floorPart:IsDescendantOf(workspace)
+            or not floorPart.CanCollide
+            or floorPart.CFrame ~= waiting.FloorCFrame
+            or gate.CFrame ~= waiting.GateCFrame
+            or clearance ~= waiting.Clearance
+        then
+            local filter = { character, gate }
+            local enemies = workspace:FindFirstChild("enemies")
+
+            if enemies then
+                table.insert(filter, enemies)
+            end
+
+            local params = RaycastParams.new()
+            params.FilterType = Enum.RaycastFilterType.Exclude
+            params.FilterDescendantsInstances = filter
+            params.RespectCanCollide = true
+            params.IgnoreWater = true
+
+            local hit = workspace:Raycast(
+                gate.Position + Vector3.new(0, 5, 0),
+                Vector3.new(0, -60, 0),
+                params
+            )
+
+            if not hit
+                or not hit.Instance:IsA("BasePart")
+                or not hit.Instance.CanCollide
+                or hit.Normal.Y <= 0
+                or hit.Normal.Y
+                    < math.cos(math.rad(humanoid.MaxSlopeAngle))
+            then
+                error("Hold Gate: walkable floor not found below gate")
+            end
+
+            local destination = hit.Position
+                + Vector3.new(0, clearance, 0)
+
+            if not RuntimeFix.floodGateContains(destination, gate) then
+                error("Hold Gate: grounded position is outside gate bounds")
+            end
+
+            waiting.Floor = hit.Instance
+            waiting.FloorCFrame = hit.Instance.CFrame
+            waiting.FloorY = hit.Position.Y
+            waiting.GateCFrame = gate.CFrame
+            waiting.Clearance = clearance
+            waiting.Position = destination
+            waiting.NextFloorCheck = now + 0.5
+        end
+
+        local water = workspace:GetAttribute("FloodLevel")
+
+        if type(water) ~= "number" then
+            error("Hold Gate: FloodLevel unavailable")
+        end
+
+        if water >= waiting.FloorY then
+            error("Hold Gate: floor is submerged; ground standing stopped")
+        end
+
+        IsHealing = false
+        RuntimeFix.FloodCombatGate = nil
+
+        -- ย้ายเฉพาะตอนเข้าเขตหรือถูกผลัก ไม่ล็อก CFrame ทุกเฟรม
+        if not waiting.Placed
+            or not RuntimeFix.floodGateContains(root.Position, gate)
+            or (root.Position - waiting.Position).Magnitude > 2
+        then
+            root.CFrame =
+                CFrame.new(waiting.Position) * root.CFrame.Rotation
+
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+            waiting.Placed = true
+        end
+
+        return true
+    end
+
     function RuntimeFix.floodSafe(position)
+        if RuntimeFix.isFloodGateStanding() then
+            return position
+        end
+
         local water = workspace:GetAttribute("FloodLevel")
 
         if RuntimeFix.isFlood() and type(water) == "number" then
@@ -7024,6 +7574,9 @@ RuntimeFix.FarmOptions = {
     end
 
     function RuntimeFix.floodHold(position)
+        if RuntimeFix.pauseFarmForSkill() then
+            return false
+        end
         local root = getCharacterRoot()
         if not root then return false end
 
@@ -7099,8 +7652,14 @@ RuntimeFix.FarmOptions = {
                 return
             end
 
+            if RuntimeFix.pauseFarmForSkill() then
+                return
+            end
+
             AlignPosition.Position =
                 RuntimeFix.floodSafe(holding.Position)
+
+            AlignPosition.Enabled = true
 
             root.AssemblyAngularVelocity = Vector3.zero
         end)
@@ -7108,9 +7667,10 @@ RuntimeFix.FarmOptions = {
         return true
     end
 
-    function RuntimeFix.floodLever(map)
-        -- สแกนครั้งแรกเมื่อ Map เปลี่ยน แล้วติดตามของที่เพิ่มใหม่
-        if RuntimeFix.FloodMap ~= map then
+    function RuntimeFix.floodLever(map, referenceY)
+        if RuntimeFix.FloodMap ~= map
+            or not RuntimeFix.FloodPrompts
+        then
             if RuntimeFix.FloodMapConnection then
                 RuntimeFix.FloodMapConnection:Disconnect()
                 RuntimeFix.FloodMapConnection = nil
@@ -7121,9 +7681,13 @@ RuntimeFix.FarmOptions = {
 
             if map then
                 local function add(object)
-                    if object:IsA("ProximityPrompt")
-                        and object.Name == "FloodLeverPrompt" then
+                    if RuntimeFix.FloodMap ~= map then
+                        return
+                    end
 
+                    if object:IsA("ProximityPrompt")
+                        and object.Name == "FloodLeverPrompt"
+                    then
                         RuntimeFix.FloodPrompts[object] = true
                     end
                 end
@@ -7137,15 +7701,44 @@ RuntimeFix.FarmOptions = {
             end
         end
 
-        for prompt in pairs(RuntimeFix.FloodPrompts or {}) do
+        if not map
+            or not map:IsDescendantOf(workspace)
+            or type(referenceY) ~= "number"
+            or referenceY ~= referenceY
+        then
+            return nil, "รอ Map หรือระดับอ้างอิงของชั้น"
+        end
+
+        local selected
+        local count = 0
+
+        for prompt in pairs(RuntimeFix.FloodPrompts) do
             if not prompt:IsDescendantOf(map) then
                 RuntimeFix.FloodPrompts[prompt] = nil
-            elseif prompt.Enabled then
-                return prompt
+            else
+                local part = prompt.Parent
+
+                if prompt.Enabled
+                    and part
+                    and part:IsA("BasePart")
+                    and part.Name == "LEVER"
+                    and math.abs(part.Position.Y - referenceY) <= 15
+                then
+                    selected = prompt
+                    count += 1
+                end
             end
         end
 
-        return nil
+        if count == 1 then
+            return selected
+        end
+
+        if count > 1 then
+            return nil, "พบ Lever Enabled หลายตัวในชั้นเดียวกัน"
+        end
+
+        return nil, "รอ Lever ของชั้นปัจจุบัน Enabled"
     end
 
     table.insert(AutoFarmSession.Cleanups, function()
@@ -7177,8 +7770,9 @@ RuntimeFix.FarmOptions = {
                 phase ~= "fight"
                 and phase ~= "block"
                 and phase ~= "drain"
-            ) then
-
+                and workspace:GetAttribute("FloodLeverAt") == nil
+            )
+        then
             stopHover()
             RuntimeFix.floodStatus("รอ Flood State จาก Server")
             return
@@ -7212,7 +7806,10 @@ RuntimeFix.FarmOptions = {
             )
         end
 
-        if floor > 0 and not origin then
+        if floor > 0
+            and not origin
+            and workspace:GetAttribute("FloodLeverAt") == nil
+        then
             stopHover()
             RuntimeFix.floodStatus("รอ Marker ของชั้นปัจจุบัน")
             return
@@ -7221,6 +7818,175 @@ RuntimeFix.FarmOptions = {
         -- พิกัดที่ผู้ใช้ยืนยันสำหรับชั้น 10
         local floor10ClearPoint = floor == 10 and not roof
             and Vector3.new(-191, 549, -19) or nil
+
+        local label = roof and "Roof" or ("Floor " .. floor)
+
+        if workspace:GetAttribute("FloodLeverAt") ~= nil then
+            local leverAt = workspace:GetAttribute("FloodLeverAt")
+
+            if typeof(leverAt) ~= "Vector3" then
+                stopHover()
+                RuntimeFix.floodStatus(
+                    label .. " | FloodLeverAt type="
+                        .. typeof(leverAt)
+                        .. " | value=" .. tostring(leverAt)
+                )
+                return
+            end
+
+            local map = world and world:FindFirstChild("Map")
+
+            local reference = leverAt
+
+            local prompt, reason = RuntimeFix.floodLever(
+                map,
+                reference.Y
+            )
+
+            if not prompt then
+                stopHover()
+                RuntimeFix.floodStatus(
+                    label .. " | " .. tostring(reason)
+                        .. " | ReferenceY="
+                        .. tostring(reference and reference.Y)
+                )
+                return
+            end
+
+            local part = prompt.Parent
+            local position = part.Position
+
+            -- ตรวจทั้งชั้น เหตุการณ์ Map และ Prompt เป้าหมาย
+            local function validTarget(requireRange)
+                if AutoFarmSession.Cancelled
+                    or not AutoFarmEnabled
+                    or RuntimeFix.EndRoundPaused
+                    or not RuntimeFix.isFlood()
+                    or RuntimeFix.floodKey() ~= key
+                    or workspace:GetAttribute("FloodFloor") ~= floor
+                    or (workspace:GetAttribute("FloodRoof") == true) ~= roof
+                    or workspace:GetAttribute("FloodLeverAt") ~= leverAt
+                    or getCharacterRoot() ~= root
+                    or not root.Parent
+                    or not humanoid.Parent
+                    or humanoid.Health <= 0
+                    or not world
+                    or world:FindFirstChild("Map") ~= map
+                    or not prompt:IsDescendantOf(map)
+                    or prompt.Parent ~= part
+                    or not prompt.Enabled
+                then
+                    return false
+                end
+
+                if RuntimeFix.floodLever(map, reference.Y) ~= prompt then
+                    return false
+                end
+
+                return not requireRange
+                    or (root.Position - part.Position).Magnitude
+                        <= prompt.MaxActivationDistance
+            end
+
+            if not validTarget(false) then
+                stopHover()
+                return
+            end
+
+            local destination = RuntimeFix.floodSafe(
+                position + Vector3.new(0, 2, 0)
+            )
+
+            if (destination - position).Magnitude
+                >= prompt.MaxActivationDistance
+            then
+                stopHover()
+                RuntimeFix.floodStatus(
+                    label .. " | ตำแหน่งปลอดภัยอยู่นอกระยะ Lever"
+                )
+                return
+            end
+
+            RuntimeFix.floodStatus(
+                label .. " | ไป Lever ของชั้นปัจจุบัน"
+            )
+
+            if not RuntimeFix.floodHold(destination) then
+                return
+            end
+
+            -- การเดินทางมี yield: ต้องตรวจเป้าหมายใหม่ก่อนกด
+            if not validTarget(true) then
+                stopHover()
+                return
+            end
+
+            if os.clock() < (RuntimeFix.FloodLeverRetryAt or 0) then
+                return
+            end
+
+            RuntimeFix.FloodLeverRetryAt =
+                os.clock() + prompt.HoldDuration + 2
+
+            RuntimeFix.FloodPrompt = prompt
+            local usedNativeHold = false
+
+            local ok, err = pcall(function()
+                if not validTarget(true) then
+                    return
+                end
+
+                if type(fireproximityprompt) == "function" then
+                    fireproximityprompt(prompt)
+                    return
+                end
+
+                usedNativeHold = true
+                prompt:InputHoldBegin()
+
+                local deadline =
+                    os.clock() + prompt.HoldDuration + 0.1
+
+                while os.clock() < deadline
+                    and validTarget(true)
+                do
+                    task.wait(0.05)
+                end
+            end)
+
+            if usedNativeHold then
+                local released, releaseError = pcall(function()
+                    prompt:InputHoldEnd()
+                end)
+
+                if not released then
+                    AutoSkillWarn(
+                        "[FloodLever] Release failed: "
+                            .. tostring(releaseError)
+                    )
+                end
+            end
+
+            RuntimeFix.FloodPrompt = nil
+
+            if not ok then
+                stopHover()
+                RuntimeFix.floodStatus(
+                    label .. " | Lever input failed: " .. tostring(err)
+                )
+                return
+            end
+
+            if not validTarget(false) then
+                stopHover()
+            else
+                RuntimeFix.floodStatus(
+                    label .. " | ส่งคำขอดึง Lever แล้ว รอ Server ยืนยัน"
+                )
+            end
+
+            return
+        end
 
         local function inFloor10Zone(part)
             return floor10ClearPoint ~= nil
@@ -7233,7 +7999,13 @@ RuntimeFix.FarmOptions = {
         -- ย้ายตามชั้นที่ Server เปิดแล้วเท่านั้น
         local floorToken = tostring(floor) .. ":" .. tostring(roof)
 
-        if RuntimeFix.FloodFloorToken ~= floorToken then
+        if RuntimeFix.FloodFloorToken ~= floorToken
+            and not (
+                phase == "block"
+                and not roof
+                and workspace:GetAttribute("FloodLeverAt") == nil
+            )
+        then
             local entryPoint = floor10ClearPoint
                 or (origin and origin + Vector3.new(0, 3, 0))
 
@@ -7245,7 +8017,6 @@ RuntimeFix.FarmOptions = {
             RuntimeFix.FloodFloorToken = floorToken
         end
 
-        local label = roof and "Roof" or ("Floor " .. floor)
 
         local contested =
             workspace:GetAttribute("FloodGateContested") == true
@@ -7347,22 +8118,42 @@ RuntimeFix.FarmOptions = {
             end
         end
 
-        -- มอนทั่วไปลอยตีภายใน Gate; บอสออกไปไล่ได้
+        -- Hold Gate: ยืนบนพื้นในเขต ไม่ Hover หรือไล่ออกนอกเขต
         if gateStage then
-            if RuntimeFix.floodKey() ~= key then return end
+            if RuntimeFix.floodKey() ~= key then
+                return
+            end
 
+            -- ออกจากการยืน Gate เพื่อจัดการบอสก่อน
             if gateBoss then
                 RuntimeFix.FloodCombatGate = nil
 
                 if CurrentTarget ~= gateBoss
+                    or RuntimeFix.WaitingStand
                     or RuntimeFix.FloodHolding
-                    or not HoverConnection then
+                    or not HoverConnection
+                then
+                    -- startHover เดิมเรียก stopHover เพื่อ Cleanup
+                    -- WaitingStand และอุปกรณ์พยุงรอบก่อนให้แล้ว
+                    if not startHover(gateBoss) then
+                        return
+                    end
+                end
 
-                    if not startHover(gateBoss) then return end
+                if AutoFarmSession.Cancelled
+                    or not AutoFarmEnabled
+                    or RuntimeFix.floodKey() ~= key
+                then
+                    return
                 end
 
                 if CurrentTarget == gateBoss
-                    and isEnemyAlive(gateBoss) then
+                    and gateBoss.Parent == enemies
+                    and isEnemyAlive(gateBoss)
+                then
+                    RuntimeFix.floodStatus(
+                        label .. " | พัก Hold Gate: จัดการบอสก่อน"
+                    )
 
                     if not handleRetreatHeal() then
                         attackEnemy()
@@ -7373,69 +8164,51 @@ RuntimeFix.FarmOptions = {
                 return
             end
 
-            local waitPosition = RuntimeFix.floodGatePosition(
-                RuntimeFix.floodSafe(root.Position),
-                activeGate
-            )
-
-            if not waitPosition then
-                RuntimeFix.FloodCombatGate = nil
-
-                RuntimeFix.floodStatus(
-                    label .. " | Gate ต่ำกว่าระยะปลอดภัยเหนือน้ำ"
-                )
-
-                RuntimeFix.floodHold(root.Position)
+            if not RuntimeFix.standOnFloodGate(activeGate) then
                 return
             end
 
-            local targetRoot = gateEnemy
-                and getEnemyRoot(gateEnemy)
+            local target
+            local nearest
 
-            local currentWater =
-                workspace:GetAttribute("FloodLevel")
+            for _, enemy in ipairs(enemies:GetChildren()) do
+                local part = getEnemyRoot(enemy)
 
-            IsHealing = false
-
-            if gateEnemy
-                and gateEnemy.Parent == enemies
-                and targetRoot
-                and isEnemyAlive(gateEnemy)
-                and type(currentWater) == "number"
-                and targetRoot.Position.Y > currentWater
-                and (
-                    targetRoot.Position - activeGate.Position
-                ).Magnitude <= 18 then
-
-                RuntimeFix.FloodCombatGate = activeGate
-
-                if CurrentTarget ~= gateEnemy
-                    or RuntimeFix.FloodHolding
-                    or not HoverConnection then
-
-                    if not startHover(gateEnemy) then return end
-                end
-
-                if RuntimeFix.floodKey() ~= key then return end
-
-                if CurrentTarget == gateEnemy
-                    and isEnemyAlive(gateEnemy) then
-
-                    RuntimeFix.floodStatus(
-                        label .. " | ลอยตีมอนภายใน Gate"
+                if part
+                    and isEnemyAlive(enemy)
+                    and part.Position.Y > water
+                    and RuntimeFix.floodGateContains(
+                        part.Position,
+                        activeGate
                     )
+                then
+                    local distanceFromRoot =
+                        (part.Position - root.Position).Magnitude
 
-                    attackEnemy()
-                    useReadySkills()
+                    if not nearest or distanceFromRoot < nearest then
+                        target = enemy
+                        nearest = distanceFromRoot
+                    end
                 end
-            else
-                RuntimeFix.FloodCombatGate = nil
+            end
 
-                RuntimeFix.floodStatus(
-                    label .. " | Hold Gate: รอมอนเข้ามา"
+            CurrentTarget = target
+
+            local progress = tonumber(
+                workspace:GetAttribute("FloodGate")
+            ) or 0
+
+            RuntimeFix.floodStatus(
+                ("%s | Hold Gate %.0f%% | ยืนบนพื้น | %s"):format(
+                    label,
+                    math.clamp(progress, 0, 1) * 100,
+                    target and "ต่อสู้ในเขต" or "รอมอนเข้ามา"
                 )
+            )
 
-                RuntimeFix.floodHold(waitPosition)
+            if target then
+                attackEnemy()
+                useReadySkills()
             end
 
             return
@@ -7585,119 +8358,6 @@ RuntimeFix.FarmOptions = {
             return
         end
 
-        if workspace:GetAttribute("FloodLeverAt") ~= nil then
-            local map = world and world:FindFirstChild("Map")
-            local prompt = RuntimeFix.floodLever(map)
-
-            local position = prompt
-                and RuntimeFix.floodPoint(prompt.Parent)
-
-            if not position then
-                RuntimeFix.floodStatus(
-                    label .. " | รอ Lever ที่ Enabled"
-                )
-
-                RuntimeFix.floodHold(root.Position)
-                return
-            end
-
-            local destination = RuntimeFix.floodSafe(
-                position + Vector3.new(0, 2, 0)
-            )
-
-            if (destination - position).Magnitude
-                >= prompt.MaxActivationDistance then
-
-                RuntimeFix.floodStatus(
-                    label .. " | Lever อยู่ต่ำกว่าระยะปลอดภัยเหนือน้ำ"
-                )
-
-                RuntimeFix.floodHold(root.Position)
-                return
-            end
-
-            RuntimeFix.floodStatus(label .. " | ดึง Lever")
-
-            if not RuntimeFix.floodHold(destination) then
-                return
-            end
-
-            if not prompt.Enabled
-                or RuntimeFix.floodKey() ~= key
-                or workspace:GetAttribute("FloodLeverAt") == nil
-                or (root.Position - position).Magnitude
-                    > prompt.MaxActivationDistance then
-                return
-            end
-
-            if os.clock()
-                < (RuntimeFix.FloodLeverRetryAt or 0) then
-                return
-            end
-
-            RuntimeFix.FloodLeverRetryAt =
-                os.clock() + prompt.HoldDuration + 2
-
-            RuntimeFix.FloodPrompt = prompt
-
-            local usedNativeHold = false
-
-            local ok, err = pcall(function()
-                if not prompt.Parent
-                    or not prompt.Enabled
-                    or AutoFarmSession.Cancelled
-                    or not AutoFarmEnabled
-                    or RuntimeFix.floodKey() ~= key
-                    or workspace:GetAttribute("FloodLeverAt") == nil
-                    or (root.Position - position).Magnitude
-                        > prompt.MaxActivationDistance then
-                    return
-                end
-
-                -- เรียก Lever โดยตรง ไม่ต้องเล็งกล้องหรือกด E
-                if type(fireproximityprompt) == "function" then
-                    fireproximityprompt(prompt)
-                    return
-                end
-
-                -- วิธีเดิม เมื่อ Executor ไม่มี API โดยตรง
-                usedNativeHold = true
-                prompt:InputHoldBegin()
-
-                local deadline =
-                    os.clock() + prompt.HoldDuration + 0.1
-
-                while os.clock() < deadline
-                    and prompt.Parent
-                    and prompt.Enabled
-                    and AutoFarmEnabled
-                    and not AutoFarmSession.Cancelled
-                    and RuntimeFix.floodKey() == key
-                    and workspace:GetAttribute("FloodLeverAt") ~= nil
-                    and (root.Position - position).Magnitude
-                        <= prompt.MaxActivationDistance do
-
-                    task.wait(0.05)
-                end
-            end)
-
-            if usedNativeHold then
-                pcall(function()
-                    prompt:InputHoldEnd()
-                end)
-            end
-
-            RuntimeFix.FloodPrompt = nil
-
-            if not ok then
-                RuntimeFix.floodStatus(
-                    "Lever input failed: " .. tostring(err)
-                )
-            end
-
-            -- รอ Server ลบ FloodLeverAt เพื่อยืนยันผลจริง
-            return
-        end
 
         local objects = world
             and world:FindFirstChild("MapObjects")
@@ -9229,7 +9889,10 @@ RuntimeFix.FarmOptions = {
         end
 
         if RuntimeFix.trialsEvolutionComplete(data) then
-            if not RuntimeFix.isSolarEvolutionReady(data) then
+            if not RuntimeFix.isSolarEvolutionReady(data)
+                or not RuntimeFix.isCrimsonEvolutionReady(data)
+                or RuntimeFix.TrialsEvolution.Pending ~= nil
+            then
                 return nil
             end
 
@@ -10251,6 +10914,7 @@ RuntimeFix.FarmOptions = {
             rin = true,
             ye_shunguang = true,
             cha_hae_in = true,
+            chisa = true,
         }
 
         local lowestSlot = nil
@@ -10308,6 +10972,7 @@ RuntimeFix.FarmOptions = {
         RuntimeFix.runtimeEvolution("frieren", "Silver Calamity"),
         RuntimeFix.runtimeEvolution("ye_shunguang", "Void Arbiter"),
         RuntimeFix.runtimeEvolution("cha_hae_in", "Solar Radiance"),
+        RuntimeFix.runtimeEvolution("chisa", "Crimson Eclipse"),
     }
 
     function RuntimeFix.getTrialsEvolutionPlan(data)
@@ -10334,11 +10999,28 @@ RuntimeFix.FarmOptions = {
 
         -- ลำดับนี้บังคับ Rin ก่อน Frieren
         for _, recipe in ipairs(RuntimeFix.TrialsEvolutionRecipes) do
-            -- Ye ต้องรับจาก Storage เข้า Inventory ก่อน Evo
             if (
                 recipe.Character == "ye_shunguang"
                 or recipe.Character == "cha_hae_in"
+                or recipe.Character == "chisa"
             ) and not RuntimeFix.findOwnedSlot(data, recipe.Character)
+            then
+                continue
+            end
+
+            -- ต้องรับ Crimson ก่อนเริ่ม Solar Evo
+            if recipe.Character == "cha_hae_in"
+                and RuntimeFix.getCrimsonStatus(data) ~= "owned"
+            then
+                continue
+            end
+
+            -- Crimson Evo เริ่มหลัง Solar Evo ยืนยันแล้วเท่านั้น
+            if recipe.Character == "chisa"
+                and (
+                    not RuntimeFix.isSolarEvolutionReady(data)
+                    or RuntimeFix.getCrimsonStatus(data) ~= "owned"
+                )
             then
                 continue
             end
@@ -10360,15 +11042,25 @@ RuntimeFix.FarmOptions = {
                     end
                 end
 
+                local allowedMaps
+
+                if recipe.Character == "cha_hae_in" then
+                    allowedMaps = {
+                        hxh = true,
+                        fateraid = true,
+                    }
+
+                elseif recipe.Character == "chisa" then
+                    allowedMaps = {
+                        hxh = true,
+                        floodescape = true,
+                    }
+                end
+
                 local target = RuntimeFix.runtimeMaterialTarget(
                     missing,
                     4,
-                    recipe.Character == "cha_hae_in"
-                        and {
-                            hxh = true,
-                            fateraid = true,
-                        }
-                        or nil
+                    allowedMaps
                 )
 
                 if not target
@@ -10633,6 +11325,231 @@ function RuntimeFix.runSolarRadiance()
     })
 end
 
+function RuntimeFix.getCrimsonStatus(data)
+    assert(type(data) == "table"
+        and type(data.UnlockedCharacters) == "table"
+        and type(data.achievements) == "table"
+        and type(data.achievements.progress) == "table",
+        "Crimson Eclipse account data unavailable")
+
+    local slot = RuntimeFix.findOwnedSlot(data, "chisa")
+    local stored = RuntimeFix.storageCount(data, "chisa")
+    local pending = RuntimeFix.StoredPending
+
+    if pending and pending.character == "chisa" then
+        local target = data.UnlockedCharacters["Slot" .. pending.slot]
+
+        if not (type(target) == "table"
+            and target.Unlocked == true
+            and target.Character == "chisa"
+            and stored < pending.beforeCount)
+        then
+            return "placing"
+        end
+    end
+
+    if slot then return "owned" end
+    if stored > 0 then return "stored" end
+    return "missing"
+end
+
+function RuntimeFix.isCrimsonEvolutionReady(data)
+    if RuntimeFix.getCrimsonStatus(data) ~= "owned" then
+        return false
+    end
+
+    local entry = type(data.CharactersData) == "table"
+        and data.CharactersData.chisa
+
+    return type(entry) == "table"
+        and entry.IsUltimateUnlocked == true
+end
+
+function RuntimeFix.getCrimsonFarmStage(data)
+    local status = RuntimeFix.getCrimsonStatus(data)
+
+    if status ~= "missing" then
+        return nil, "Crimson Eclipse -> Lobby / " .. status
+    end
+
+    local entry =
+        RuntimeFix.runtimeConfig("unitCraftConfig")["unit.chisa"]
+
+    assert(type(entry) == "table" and entry.Unit == "chisa",
+        "unitCraftConfig.unit.chisa unavailable")
+
+    local materials = RuntimeFix.parseRuntimeMaterials(entry.Misc)
+
+    assert(next(materials), "Crimson Eclipse recipe is empty")
+    assert(type(data.material) == "table", "Material data unavailable")
+
+    local missing = false
+
+    for id, amount in pairs(materials) do
+        assert(id == "128" or id == "129" or id == "130",
+            "Unverified Crimson material source: " .. tostring(id))
+
+        if getMaterialAmount(data, id) < amount then
+            missing = true
+        end
+    end
+
+    if missing then
+        return {
+            Map = "floodescape",
+            Chapter = 0,
+            Difficulty = 4,
+        }, "Crimson Eclipse materials -> Flood Escape"
+    end
+
+    return nil, "Crimson Eclipse ready -> Lobby to craft"
+end
+
+function RuntimeFix.runCrimsonEclipse()
+    if AutoFarmSession.Cancelled
+        or game.PlaceId ~= AUTO_JOIN_PLACE_ID
+        or RuntimeFix.CrimsonBusy
+    then
+        return false
+    end
+
+    RuntimeFix.CrimsonBusy = true
+
+    local ok, result = pcall(function()
+        local data = RuntimeFix.readAccount()
+
+        if not data
+            or not RuntimeFix.trialsEvolutionComplete(data)
+            or not RuntimeFix.isSolarInventoryReady(data)
+        then
+            return false
+        end
+
+        local status = RuntimeFix.getCrimsonStatus(data)
+
+        if status ~= "missing" then
+            RuntimeFix.CrimsonCraftPending = nil
+
+            if status == "owned" then
+                return true
+            end
+
+            RuntimeFix.monarchClearQueue()
+            return false -- รอ Storage watcher รับตัว
+        end
+
+        local pending = RuntimeFix.CrimsonCraftPending
+
+        if pending then
+            if not pending.Warned
+                and os.clock() - pending.SentAt >= 15
+            then
+                pending.Warned = true
+                AutoSkillWarn(
+                    "[CrimsonEclipse] Waiting for inventory/storage "
+                    .. "confirmation; craft request will not be repeated."
+                )
+            end
+
+            return false
+        end
+
+        if RuntimeFix.StoredPending or RuntimeFix.Crafting then
+            return false
+        end
+
+        local target = RuntimeFix.getCrimsonFarmStage(data)
+        local queueKey = "CrimsonEclipse_Flood"
+
+        if target
+            and ActiveLobbyQueue == queueKey
+            and LastLobbyJoinAttemptClock > 0
+            and os.clock() - LastLobbyJoinAttemptClock
+                < LOBBY_JOIN_TIMEOUT_SECONDS
+        then
+            return true
+        end
+
+        local retrying = ActiveLobbyQueue == queueKey
+
+        if not RuntimeFix.monarchClearQueue() then
+            return false
+        end
+
+        if target then
+            if retrying then
+                cycleNextRoomNumber()
+            end
+
+            RuntimeFix.TrialsEvolution.ActiveForEvo = nil
+
+            if not prepareTeam()
+                or AutoFarmSession.Cancelled
+                or not queueScriptOnTeleport()
+            then
+                return false
+            end
+        end
+
+        local packets = not target and RuntimeFix.getPackets() or nil
+        local fresh = RuntimeFix.readAccount()
+
+        if AutoFarmSession.Cancelled
+            or not fresh
+            or not RuntimeFix.trialsEvolutionComplete(fresh)
+            or not RuntimeFix.isSolarInventoryReady(fresh)
+            or RuntimeFix.getCrimsonStatus(fresh) ~= "missing"
+            or RuntimeFix.StoredPending
+            or RuntimeFix.Crafting
+        then
+            return false
+        end
+
+        local freshTarget = RuntimeFix.getCrimsonFarmStage(fresh)
+
+        if (target ~= nil) ~= (freshTarget ~= nil) then
+            return false
+        end
+
+        if not freshTarget then
+            assert(packets.craftAccessory
+                and type(packets.craftAccessory.fire) == "function",
+                "craftAccessory unavailable")
+
+            -- ตั้งก่อนส่ง เพราะไม่มี result packet สำหรับยืนยันการคราฟต์
+            RuntimeFix.CrimsonCraftPending = {
+                SentAt = os.clock(),
+            }
+
+            packets.craftAccessory:fire("unit.chisa")
+            return false
+        end
+
+        ActiveLobbyQueue = queueKey
+        LastLobbyJoinAttemptClock = os.clock()
+        LastLobbyJoinAction = RuntimeFix.runMonarch
+
+        return RuntimeFix.createQueue({
+            gamemode = "Escape",
+            map = "Flood",
+            chapter = 0,
+            floor = 0,
+            difficulty = 4,
+            maxPlayers = 1,
+            friendsOnly = false,
+            roomNumber = CurrentLobbyRoomNumber,
+        })
+    end)
+
+    RuntimeFix.CrimsonBusy = false
+
+    if not ok then
+        error(result, 0)
+    end
+
+    return result
+end
+
     function RuntimeFix.runCompletedShadowGate()
         if AutoFarmSession.Cancelled
             or game.PlaceId ~= AUTO_JOIN_PLACE_ID
@@ -10649,7 +11566,14 @@ end
             return RuntimeFix.runSolarRadiance()
         end
 
-        if not RuntimeFix.isSolarEvolutionReady(data) then
+        if RuntimeFix.getCrimsonStatus(data) ~= "owned" then
+            return RuntimeFix.runCrimsonEclipse()
+        end
+
+        if not RuntimeFix.isSolarEvolutionReady(data)
+            or not RuntimeFix.isCrimsonEvolutionReady(data)
+            or RuntimeFix.TrialsEvolution.Pending ~= nil
+        then
             return RuntimeFix.runTrialsEvolution()
         end
 
@@ -10704,7 +11628,10 @@ end
         if AutoFarmSession.Cancelled or not RuntimeFix.trialsEvolutionComplete(fresh) then
             return false
         end
-        if not RuntimeFix.isSolarEvolutionReady(fresh) then
+        if not RuntimeFix.isSolarEvolutionReady(fresh)
+            or not RuntimeFix.isCrimsonEvolutionReady(fresh)
+            or RuntimeFix.TrialsEvolution.Pending ~= nil
+        then
             return false
         end
 
@@ -10897,22 +11824,40 @@ end
         LastLobbyJoinAction = RuntimeFix.runMonarch
 
         local isStory = target.Map == "hxh"
+        local isFlood = target.Map == "floodescape"
 
-        RuntimeFix.createQueue({
-            gamemode = isStory and "Story" or "Raid",
-            map = isStory and "Hxh"
-                    or (
-                        target.Map == "fateraid" and "Fate"
-                        or target.Map == "spiritedawayraid" and "BathTub"
-                        or "ShadowGate"
-                    ),
+        local queueMap
+
+        if isStory then
+            queueMap = "Hxh"
+        elseif isFlood then
+            queueMap = "Flood"
+        elseif target.Map == "fateraid" then
+            queueMap = "Fate"
+        elseif target.Map == "spiritedawayraid" then
+            queueMap = "BathTub"
+        elseif target.Map == "sololevelingraid" then
+            queueMap = "ShadowGate"
+        else
+            error("Unsupported evolution map: " .. tostring(target.Map))
+        end
+
+        local queued = RuntimeFix.createQueue({
+            gamemode = isStory and "Story"
+                or isFlood and "Escape"
+                or "Raid",
+            map = queueMap,
             chapter = isStory and target.Chapter or 0,
             floor = 0,
-            difficulty = 4,
+            difficulty = target.Difficulty,
             maxPlayers = 1,
             friendsOnly = false,
             roomNumber = CurrentLobbyRoomNumber,
         })
+
+        if not queued then
+            return false
+        end
 
         RuntimeFix.igrisLog(string.format(
             "%s | %s Chapter %d Nightmare",
@@ -12495,6 +13440,8 @@ end)
             end
             local char = getCharacter()
 
+            RuntimeFix.repairFarmCamera()
+
             -- ตรวจน้ำระหว่างเดินทางด้วย ไม่ใช่เฉพาะปลายทาง
             if RuntimeFix.isFlood()
                 and not RuntimeFix.EndRoundPaused
@@ -12525,8 +13472,19 @@ end)
 
                 for _, v in ipairs(char:GetDescendants()) do
                     if v:IsA("BasePart") then
-                        if waiting and v == waiting.Root then
+                        if RuntimeFix.isFloodGateStanding() then
+                            local saved = RuntimeFix.FarmCollisionSaved
+                            local original = saved and saved[v]
+
+                            if v == waiting.Root then
+                                v.CanCollide = true
+                            elseif original ~= nil then
+                                v.CanCollide = original
+                            end
+
+                        elseif waiting and v == waiting.Root then
                             v.CanCollide = true
+
                         elseif v.CanCollide then
                             v.CanCollide = false
                         end
@@ -12565,6 +13523,11 @@ end)
                     LastTeleportedArea = nil
 
                     task.wait(0.2)
+                    continue
+                end
+
+                if RuntimeFix.pauseFarmForSkill() then
+                    task.wait(0.05)
                     continue
                 end
 
@@ -13115,6 +14078,7 @@ end)
             rin = true,
             ye_shunguang = true,
             cha_hae_in = true,
+            chisa = true,
         }
 
         -- เลือกช่องแรกที่ปลดล็อกและแทนที่ได้
@@ -13151,6 +14115,7 @@ end)
         -- Evo ครบแล้ว ไม่ให้การรอรับตัวจาก Storage บล็อก Auto Join
         if RuntimeFix.trialsEvolutionComplete(data)
             and RuntimeFix.isSolarInventoryReady(data)
+            and RuntimeFix.getCrimsonStatus(data) == "owned"
             and not RuntimeFix.StoredPending
         then
             return true
@@ -13225,6 +14190,12 @@ end)
         then
             character = RuntimeFix.SolarTarget.Character
 
+        elseif RuntimeFix.trialsEvolutionComplete(data)
+            and RuntimeFix.isSolarInventoryReady(data)
+            and RuntimeFix.getCrimsonStatus(data) == "stored"
+        then
+            character = "chisa"
+
         elseif RuntimeFix.storageCount(data, "sung_jinwoo") > 0
             and not RuntimeFix.findOwnedSlot(data, "sung_jinwoo")
         then
@@ -13256,7 +14227,7 @@ end)
         local isSolarCharacter =
             character == RuntimeFix.SolarTarget.Character
 
-        if isSolarCharacter
+        if (isSolarCharacter or character == "chisa")
             and not RuntimeFix.monarchClearQueue()
         then
             return false
@@ -13311,6 +14282,7 @@ end)
             sung_jinwoo = true,
             ye_shunguang = true,
             cha_hae_in = true,
+            chisa = true,
         }
 
         if isTrialsCharacter then
@@ -13321,6 +14293,7 @@ end)
                 rin = true,
                 ye_shunguang = true,
                 cha_hae_in = true,
+                chisa = true,
             }
 
             -- ตรวจช่อง Rarity ต่ำสุดใหม่ก่อนส่งคำขอ
@@ -16999,18 +17972,27 @@ end)
                     0.51
                 )
 
+            accessoryView.CrimsonStatusLabel =
+                createStatusRow(
+                    content,
+                    "Crimson | รอข้อมูล",
+                    0.81,
+                    0.51
+                )
+
             for index, label in ipairs({
                 rinStatusLabel,
                 frierenStatusLabel,
                 yeStatusLabel,
                 accessoryView.SolarStatusLabel,
+                accessoryView.CrimsonStatusLabel,
             }) do
                 label.Position = UDim2.fromScale(
-                    0.01 + (index - 1) * 0.25,
+                    0.01 + (index - 1) * 0.20,
                     0.51
                 )
 
-                label.Size = UDim2.fromScale(0.235, 0.115)
+                label.Size = UDim2.fromScale(0.185, 0.115)
                 label.TextWrapped = true
                 label.TextYAlignment = Enum.TextYAlignment.Top
             end
@@ -17952,6 +18934,15 @@ end)
                     "cha_hae_in",
                     "Solar Radiance"
                 )
+            end
+
+            if accessoryView.CrimsonStatusLabel then
+                accessoryView.CrimsonStatusLabel.Text =
+                    getTrialsUnitStatusText(
+                        data,
+                        "chisa",
+                        "Crimson"
+                    )
             end
 
             if rinStatusLabel then
@@ -20744,10 +21735,19 @@ RuntimeFix.startMirrorBlessing()
                 return RuntimeFix.getSolarFarmStage(data)
             end
 
-            if not RuntimeFix.isSolarEvolutionReady(data) then
+            if RuntimeFix.getCrimsonStatus(data) ~= "owned" then
+                return RuntimeFix.getCrimsonFarmStage(data)
+            end
+
+            if not RuntimeFix.isSolarEvolutionReady(data)
+                or not RuntimeFix.isCrimsonEvolutionReady(data)
+            then
                 local evolution = RuntimeFix.getTrialsEvolutionPlan(data)
 
-                assert(evolution, "Solar Evolution plan unavailable")
+                assert(
+                    evolution,
+                    "Solar/Crimson Evolution plan unavailable"
+                )
 
                 return evolution.Target, evolution.Reason
             end
@@ -21493,6 +22493,11 @@ RuntimeFix.startMirrorBlessing()
                     else
                         -- เรียกตัวเลือกงานทั่วไปเฉพาะเมื่อไม่ได้กำลังหาตัวละคร
                         target, reason = RuntimeFix.getNextFarmStage()
+
+                        if currentMap == "floodescape" then
+                            huntingAction =
+                                (target and target.Map == "floodescape") and 1 or 3
+                        end
                     end
 
                     -- เหตุผลจาก getNextFarmStage() ในโค้ดเดิม
