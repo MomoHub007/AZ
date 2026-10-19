@@ -5087,21 +5087,21 @@ RuntimeFix.FarmOptions = {
             return false
         end
 
-        local movementLock = root:FindFirstChild("SkillMovementLock")
+        local movementLock =
+            root:FindFirstChild("SkillMovementLock")
 
-        if not movementLock
-            or not movementLock:IsA("Attachment")
-        then
-            return false
+        -- มีแรงตรึงตำแหน่งของเกม จึงถือเป็นสกิลอยู่กับที่
+        if movementLock and movementLock:IsA("Attachment") then
+            local stationaryHold =
+                movementLock:FindFirstChildOfClass("AlignPosition")
+
+            if stationaryHold and stationaryHold.Enabled then
+                return false
+            end
         end
 
-        -- สกิลอยู่กับที่: เกมมีแรงตรึงตำแหน่งของตัวเอง
-        local stationaryHold =
-            movementLock:FindFirstChildOfClass("AlignPosition")
-
-        if stationaryHold and stationaryHold.Enabled then
-            return false
-        end
+        -- ไม่มี SkillMovementLock ก็ต้องตรวจ Mover ต่อ
+        -- เพราะสกิลพุ่งที่ใช้ holdPosition=false อาจไม่สร้าง Attachment นี้
 
         local moving = false
 
