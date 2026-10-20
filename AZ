@@ -3928,6 +3928,11 @@ RuntimeFix.FarmOptions = {
                 )
         end
 
+        -- ต้องตรวจให้ผ่านก่อนถึง stopHover() และการย้ายตัวละคร
+        if isUsingSkill() then
+            return false
+        end
+
         local floodContext =
             RuntimeFix.isFlood() and RuntimeFix.floodKey()
 
@@ -4714,6 +4719,41 @@ RuntimeFix.FarmOptions = {
                 and not RuntimeFix.isRubbleBroken(rubble)
         end
 
+        local groundRubble = game:GetService("UserInputService").TouchEnabled
+        if groundRubble then
+            if not MapFolder or not MapFolder:IsDescendantOf(workspace) then
+                RuntimeFix.RubbleRepeatToken = nil
+                return false
+            end
+
+            local params = RaycastParams.new()
+            params.FilterType = Enum.RaycastFilterType.Include
+            params.FilterDescendantsInstances = { MapFolder }
+            params.RespectCanCollide = true
+            params.IgnoreWater = true
+
+            local hit = workspace:Raycast(
+                targetCFrame.Position + Vector3.new(0, 16, 0),
+                Vector3.new(0, -128, 0),
+                params
+            )
+
+            if not hit or not hit.Instance:IsA("BasePart") or not hit.Instance.CanCollide or hit.Normal.Y < 0.5 then
+                RuntimeFix.RubbleRepeatToken = nil
+                RuntimeFix.RubbleGroundWarnAt = RuntimeFix.RubbleGroundWarnAt or -math.huge
+                if os.clock() - RuntimeFix.RubbleGroundWarnAt >= 5 then
+                    RuntimeFix.RubbleGroundWarnAt = os.clock()
+                    warn("[Rubble Mobile] Walkable floor unavailable")
+                end
+                return false
+            end
+
+            local clearance = math.max(humanoid.HipHeight, 0) + root.Size.Y * 0.5
+            targetCFrame = CFrame.new(
+                hit.Position + Vector3.new(0, clearance, 0)
+            ) * targetCFrame.Rotation
+        end
+
         root.Anchored = false
         humanoid.AutoRotate = false
 
@@ -4729,6 +4769,20 @@ RuntimeFix.FarmOptions = {
 
         root.AssemblyLinearVelocity = Vector3.zero
         root.AssemblyAngularVelocity = Vector3.zero
+
+        -- Touch: ถึงพื้นแล้วปล่อยยืน ไม่สร้างแรงพยุง
+        if groundRubble then
+            RuntimeFix.WaitingStand = {
+                Root = root,
+                Area = areaKey,
+                Rubble = rubble,
+                TargetCFrame = targetCFrame,
+                WasCanCollide = root.CanCollide,
+            }
+            root.CanCollide = true
+            humanoid.AutoRotate = true
+            return true
+        end
 
         local attachment = Instance.new("Attachment")
         attachment.Name = "AutoRubbleFloatAttachment"
@@ -5130,10 +5184,40 @@ RuntimeFix.FarmOptions = {
     end
 
     function RuntimeFix.pauseFarmForSkill()
-        if AutoFarmSession.Cancelled
-            or not AutoFarmEnabled
-            or not isGameSkillBusy()
+        if AutoFarmSession.Cancelled or not AutoFarmEnabled then
+            return false
+        end
+
+        local skillBusy = isGameSkillBusy()
+        local touchInput =
+            game:GetService("UserInputService").TouchEnabled
+
+        if touchInput
+            and (RuntimeFix.SkillInvokeBusy or skillBusy)
         then
+            -- Cleanup อาจคืนค่าแรงพยุง จึงต้องทำก่อนปิดแรง
+            if RuntimeFix.RootTweenCleanup then
+                RuntimeFix.RootTweenCleanup()
+            end
+
+            if AlignPosition and AlignPosition.Parent then
+                AlignPosition.Enabled = false
+            end
+
+            if AlignOrientation and AlignOrientation.Parent then
+                AlignOrientation.Enabled = false
+            end
+
+            local force = RuntimeFix.RubbleFloatForce
+
+            if force and force.Parent then
+                force.Enabled = false
+            end
+
+            return true
+        end
+
+        if not skillBusy then
             return false
         end
 
@@ -5204,13 +5288,13 @@ RuntimeFix.FarmOptions = {
     end
 
     function RuntimeFix.repairFarmCamera()
+        RuntimeFix.FarmCameraRecovery = nil
+
         if not AutoFarmEnabled
             or AutoFarmSession.Cancelled
             or RuntimeFix.EndRoundPaused
             or PlayerGui:GetAttribute("EndScreenActive") == true
-            or isGameSkillBusy()
         then
-            RuntimeFix.FarmCameraRecovery = nil
             return
         end
 
@@ -5218,43 +5302,38 @@ RuntimeFix.FarmOptions = {
         local character = getCharacter()
         local humanoid = getHumanoid()
 
-        if not camera or not character or not humanoid
+        if not camera
+            or not character
+            or not humanoid
             or humanoid.Parent ~= character
             or humanoid.Health <= 0
         then
-            RuntimeFix.FarmCameraRecovery = nil
             return
         end
 
-        if camera.CameraType == Enum.CameraType.Scriptable then
-            local recovery = RuntimeFix.FarmCameraRecovery
-
-            if not recovery
-                or recovery.Camera ~= camera
-                or recovery.Humanoid ~= humanoid
-            then
-                RuntimeFix.FarmCameraRecovery = {
-                    Camera = camera,
-                    Humanoid = humanoid,
-                    IdleSince = os.clock(),
-                }
-
-                return
-            end
-
-            if os.clock() - recovery.IdleSince < 1 then
-                return
-            end
-
-            camera.CameraSubject = humanoid
-            camera.CameraType = Enum.CameraType.Custom
+        if camera.CameraType ~= Enum.CameraType.Custom then
+            return
         end
 
-        RuntimeFix.FarmCameraRecovery = nil
+        local subject = camera.CameraSubject
+        local previousHumanoid = RuntimeFix.FarmCameraHumanoid
 
-        if camera.CameraType == Enum.CameraType.Custom
-            and camera.CameraSubject ~= humanoid
-        then
+        local needsRepair = not subject
+            or not subject.Parent
+            or (
+                subject ~= humanoid
+                and (
+                    subject == previousHumanoid
+                    or (
+                        subject:IsA("Humanoid")
+                        and subject.Health <= 0
+                    )
+                )
+            )
+
+        RuntimeFix.FarmCameraHumanoid = humanoid
+
+        if needsRepair then
             camera.CameraSubject = humanoid
         end
     end
@@ -6368,6 +6447,12 @@ RuntimeFix.FarmOptions = {
         RuntimeFix.SkillInvokeBusy = true
 
         local success, result = xpcall(function()
+            -- ปลดการควบคุมก่อนเริ่มสกิล
+            -- ไม่ต้องรอ pending/till ของเกมอัปเดต
+            if touchInput then
+                RuntimeFix.pauseFarmForSkill()
+            end
+
             changeIdentity(2)
 
             return RuntimeFix.invokeAutoSkill(
@@ -6929,9 +7014,22 @@ RuntimeFix.FarmOptions = {
 
         -- เคยไปถึงแล้ว แต่ลูปพยุงหรืออุปกรณ์พยุงหายไป:
         -- ให้เริ่ม Tween + Hover ใหม่
+        local standing = RuntimeFix.WaitingStand
+        local root = getCharacterRoot()
+
+        local groundedRubble = standing
+            and root
+            and standing.Root == root
+            and standing.Rubble == CurrentRubble
+            and typeof(standing.TargetCFrame) == "CFrame"
+            and (
+                root.Position - standing.TargetCFrame.Position
+            ).Magnitude <= 3
+
         if RubbleTeleported
             and CurrentRubble
             and not RuntimeFix.isRubbleBroken(CurrentRubble)
+            and not groundedRubble
             and (
                 RuntimeFix.RubbleRepeatToken == nil
                 or not RuntimeFix.RubbleFloatForce
@@ -6958,7 +7056,10 @@ RuntimeFix.FarmOptions = {
             end
         end
 
-        if CurrentRubble and CurrentRubble.Parent then
+        if RubbleTeleported
+            and CurrentRubble
+            and CurrentRubble.Parent
+        then
             attackRubble()
         end
     end
@@ -13602,6 +13703,16 @@ end)
                                 v.CanCollide = original
                             end
 
+                        elseif waiting and waiting.Rubble then
+                            local saved = RuntimeFix.FarmCollisionSaved
+                            local original = saved and saved[v]
+
+                            if v == waiting.Root then
+                                v.CanCollide = true
+                            elseif original ~= nil then
+                                v.CanCollide = original
+                            end
+
                         elseif waiting and v == waiting.Root then
                             v.CanCollide = true
 
@@ -13648,7 +13759,8 @@ end)
                     continue
                 end
 
-                if RuntimeFix.pauseFarmForSkill() then
+                -- รอทุกสกิลจบก่อนเปลี่ยนเป้าหมายหรือเริ่มเดินทาง
+                if isGameSkillBusy() then
                     task.wait(0.05)
                     continue
                 end
@@ -13722,7 +13834,8 @@ end)
                         handleRubbleStatus(areaName)
                     end
 
-                    if CurrentRubble
+                    if RubbleTeleported
+                        and CurrentRubble
                         and CurrentRubble.Parent
                         and not RuntimeFix.isRubbleBroken(CurrentRubble)
                     then
