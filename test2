@@ -4776,6 +4776,7 @@ RuntimeFix.FarmOptions = {
                 Root = root,
                 Area = areaKey,
                 Rubble = rubble,
+                TargetCFrame = targetCFrame,
                 WasCanCollide = root.CanCollide,
             }
             root.CanCollide = true
@@ -7014,7 +7015,16 @@ RuntimeFix.FarmOptions = {
         -- เคยไปถึงแล้ว แต่ลูปพยุงหรืออุปกรณ์พยุงหายไป:
         -- ให้เริ่ม Tween + Hover ใหม่
         local standing = RuntimeFix.WaitingStand
-        local groundedRubble = standing and standing.Root == getCharacterRoot() and standing.Rubble == CurrentRubble
+        local root = getCharacterRoot()
+
+        local groundedRubble = standing
+            and root
+            and standing.Root == root
+            and standing.Rubble == CurrentRubble
+            and typeof(standing.TargetCFrame) == "CFrame"
+            and (
+                root.Position - standing.TargetCFrame.Position
+            ).Magnitude <= 3
 
         if RubbleTeleported
             and CurrentRubble
@@ -7046,7 +7056,10 @@ RuntimeFix.FarmOptions = {
             end
         end
 
-        if CurrentRubble and CurrentRubble.Parent then
+        if RubbleTeleported
+            and CurrentRubble
+            and CurrentRubble.Parent
+        then
             attackRubble()
         end
     end
@@ -13821,7 +13834,8 @@ end)
                         handleRubbleStatus(areaName)
                     end
 
-                    if CurrentRubble
+                    if RubbleTeleported
+                        and CurrentRubble
                         and CurrentRubble.Parent
                         and not RuntimeFix.isRubbleBroken(CurrentRubble)
                     then
