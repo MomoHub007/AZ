@@ -3403,6 +3403,7 @@ RuntimeFix.FarmOptions = {
 
             if RuntimeFix.ActiveRootTween == tween then
                 RuntimeFix.ActiveRootTween = nil
+                RuntimeFix.DebugTravelTarget = nil
             end
 
             tween:Cancel()
@@ -3425,6 +3426,7 @@ RuntimeFix.FarmOptions = {
 
         RuntimeFix.RootTweenCleanup = cleanup
         RuntimeFix.ActiveRootTween = tween
+        RuntimeFix.DebugTravelTarget = targetCFrame
 
         local arrived = false
 
@@ -5165,6 +5167,7 @@ RuntimeFix.FarmOptions = {
 
             local playerStore = require(module)
             local skill = playerStore.state.skill
+            RuntimeFix.DebugSkillState = skill
 
             if not skill then
                 return false
@@ -13612,6 +13615,480 @@ end)
             return true
         end
 
+    function RuntimeFix.startMobileDebug()
+        if RuntimeFix.MobileDebugCleanup then
+            RuntimeFix.MobileDebugCleanup()
+        end
+
+        local INTERVAL = 0.2
+        local CAPACITY = 150
+
+        local history = {}
+        local head = 0
+        local count = 0
+        local frozen = false
+        local stopped = false
+        local elapsed = 0
+
+        local connections = {}
+        local characterConnections = {}
+        local watchedCharacter = nil
+        local movers = {}
+        local parts = {}
+
+        local properties = {
+            AlignPosition = {
+                "Enabled", "Mode", "Position", "MaxForce",
+                "MaxVelocity", "Responsiveness", "RigidityEnabled",
+                "Attachment0", "Attachment1",
+            },
+            AlignOrientation = {
+                "Enabled", "Mode", "CFrame", "MaxTorque",
+                "Responsiveness", "Attachment0", "Attachment1",
+            },
+            VectorForce = {
+                "Enabled", "Force", "RelativeTo", "Attachment0",
+            },
+            LinearVelocity = {
+                "Enabled", "VectorVelocity", "MaxForce",
+                "VelocityConstraintMode", "RelativeTo", "Attachment0",
+            },
+            BodyPosition = { "Position", "MaxForce", "P", "D" },
+            BodyVelocity = { "Velocity", "MaxForce", "P" },
+            BodyForce = { "Force" },
+            BodyGyro = { "CFrame", "MaxTorque", "P", "D" },
+        }
+
+        local function path(object)
+            if typeof(object) ~= "Instance" then
+                return "-"
+            end
+
+            local ok, result = pcall(function()
+                return object:GetFullName()
+            end)
+
+            return ok and result or "<unavailable>"
+        end
+
+        local function vector(value)
+            if typeof(value) ~= "Vector3" then
+                return "-"
+            end
+
+            return ("%.2f,%.2f,%.2f"):format(
+                value.X, value.Y, value.Z
+            )
+        end
+
+        local function valueText(value)
+            if typeof(value) == "Vector3" then
+                return vector(value)
+            elseif typeof(value) == "CFrame" then
+                return "pos(" .. vector(value.Position)
+                    .. ") look(" .. vector(value.LookVector) .. ")"
+            elseif typeof(value) == "Instance" then
+                return path(value)
+            end
+
+            return tostring(value)
+        end
+
+        local function readState(state, key)
+            local ok, result = pcall(function()
+                local entry = state and state[key]
+
+                if entry == nil then
+                    return "<unknown>"
+                end
+
+                return entry:get()
+            end)
+
+            return ok and tostring(result) or "<read-error>"
+        end
+
+        local function disconnectAll(list)
+            for _, connection in ipairs(list) do
+                connection:Disconnect()
+            end
+            table.clear(list)
+        end
+
+        local function track(object)
+            if properties[object.ClassName] then
+                movers[object] = true
+            end
+            if object:IsA("BasePart") then
+                parts[object] = true
+            end
+        end
+
+        local function watchCharacter(character)
+            disconnectAll(characterConnections)
+            table.clear(movers)
+            table.clear(parts)
+            watchedCharacter = character
+
+            if not character then
+                return
+            end
+
+            -- สแกนเฉพาะตัวละครครั้งเดียวเมื่อ Character เปลี่ยน
+            for _, object in ipairs(character:GetDescendants()) do
+                track(object)
+            end
+
+            table.insert(characterConnections,
+                character.DescendantAdded:Connect(track)
+            )
+
+            table.insert(characterConnections,
+                character.DescendantRemoving:Connect(function(object)
+                    movers[object] = nil
+                    parts[object] = nil
+                end)
+            )
+        end
+
+        local function push(record)
+            head = head % CAPACITY + 1
+            history[head] = record
+            count = math.min(count + 1, CAPACITY)
+        end
+
+        local function exportLog()
+            local output = {
+                "AZ MOBILE DEBUG v1",
+                "UTC=" .. os.date("!%Y-%m-%dT%H:%M:%SZ"),
+                "PlaceId=" .. tostring(game.PlaceId),
+                "JobId=" .. tostring(game.JobId),
+                "TouchEnabled=" .. tostring(
+                    game:GetService("UserInputService").TouchEnabled
+                ),
+                "Baseline file blob=5bddda99009f284ec455dfac04844e67c887bdc9",
+                "Samples=" .. tostring(count),
+                "----",
+            }
+
+            for index = 1, count do
+                local slot = (head - count + index - 1) % CAPACITY + 1
+                table.insert(output, history[slot])
+            end
+
+            return table.concat(output, "\n")
+        end
+
+        local function create(className, parent, settings)
+            local object = Instance.new(className)
+            for key, value in pairs(settings) do
+                object[key] = value
+            end
+            object.Parent = parent
+            return object
+        end
+
+        local gui = create("ScreenGui", PlayerGui, {
+            Name = "AZMobileDebug",
+            ResetOnSpawn = false,
+            DisplayOrder = 10000,
+            ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+        })
+
+        local panel = create("Frame", gui, {
+            AnchorPoint = Vector2.new(0, 1),
+            Position = UDim2.fromScale(0.03, 0.94),
+            Size = UDim2.new(0.94, 0, 0, 230),
+            BackgroundColor3 = Color3.fromRGB(18, 21, 28),
+            BackgroundTransparency = 0.08,
+            BorderSizePixel = 0,
+        })
+
+        create("UISizeConstraint", panel, {
+            MaxSize = Vector2.new(720, 230),
+        })
+
+        local title = create("TextButton", panel, {
+            Size = UDim2.new(1, 0, 0, 30),
+            BackgroundColor3 = Color3.fromRGB(38, 46, 62),
+            BorderSizePixel = 0,
+            Text = "AZ DEBUG — แตะเพื่อย่อ/ขยาย",
+            TextColor3 = Color3.new(1, 1, 1),
+            TextSize = 13,
+        })
+
+        local content = create("Frame", panel, {
+            Position = UDim2.fromOffset(0, 30),
+            Size = UDim2.new(1, 0, 1, -30),
+            BackgroundTransparency = 1,
+        })
+
+        local live = create("TextLabel", content, {
+            Position = UDim2.fromOffset(8, 4),
+            Size = UDim2.new(1, -16, 1, -44),
+            BackgroundTransparency = 1,
+            TextColor3 = Color3.fromRGB(205, 240, 220),
+            Font = Enum.Font.Code,
+            TextSize = 12,
+            TextWrapped = true,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextYAlignment = Enum.TextYAlignment.Top,
+            Text = "กำลังเริ่มบันทึก...",
+        })
+
+        local logBox = create("TextBox", content, {
+            Position = live.Position,
+            Size = live.Size,
+            BackgroundColor3 = Color3.fromRGB(25, 28, 35),
+            TextColor3 = Color3.new(1, 1, 1),
+            Font = Enum.Font.Code,
+            TextSize = 11,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextYAlignment = Enum.TextYAlignment.Top,
+            MultiLine = true,
+            ClearTextOnFocus = false,
+            TextEditable = true,
+            TextWrapped = false,
+            Text = "",
+            Visible = false,
+        })
+
+        local function button(text, index)
+            return create("TextButton", content, {
+                Position = UDim2.new((index - 1) * 0.25, 4, 1, -34),
+                Size = UDim2.new(0.25, -8, 0, 28),
+                BackgroundColor3 = Color3.fromRGB(48, 59, 78),
+                BorderSizePixel = 0,
+                TextColor3 = Color3.new(1, 1, 1),
+                TextSize = 12,
+                Text = text,
+            })
+        end
+
+        local freezeButton = button("หยุดบันทึก", 1)
+        local copyButton = button("Copy", 2)
+        local logButton = button("Log", 3)
+        local closeButton = button("ปิด", 4)
+
+        local function setFrozen(value)
+            frozen = value
+            freezeButton.Text = value and "บันทึกต่อ" or "หยุดบันทึก"
+        end
+
+        local cleanup
+        cleanup = function()
+            if stopped then
+                return
+            end
+            stopped = true
+            disconnectAll(connections)
+            disconnectAll(characterConnections)
+            table.clear(movers)
+            table.clear(parts)
+            gui:Destroy()
+
+            if RuntimeFix.MobileDebugCleanup == cleanup then
+                RuntimeFix.MobileDebugCleanup = nil
+            end
+        end
+
+        RuntimeFix.MobileDebugCleanup = cleanup
+        table.insert(AutoFarmSession.Cleanups, cleanup)
+
+        local function connect(signal, callback)
+            table.insert(connections, signal:Connect(callback))
+        end
+
+        connect(title.Activated, function()
+            content.Visible = not content.Visible
+            panel.Size = UDim2.new(
+                0.94, 0, 0, content.Visible and 230 or 30
+            )
+        end)
+
+        connect(freezeButton.Activated, function()
+            setFrozen(not frozen)
+            if not frozen then
+                logBox.Visible = false
+            end
+        end)
+
+        connect(copyButton.Activated, function()
+            setFrozen(true)
+            local text = exportLog()
+            local copyFunction = setclipboard or toclipboard
+
+            if type(copyFunction) == "function" then
+                local ok = pcall(copyFunction, text)
+                if ok then
+                    title.Text = "คัดลอกแล้ว — แตะเพื่อย่อ/ขยาย"
+                    return
+                end
+            end
+
+            logBox.Text = text
+            logBox.Visible = true
+            title.Text = "Clipboard ไม่พร้อม — เลือกข้อความในช่อง Log"
+        end)
+
+        connect(logButton.Activated, function()
+            if not logBox.Visible then
+                setFrozen(true)
+                logBox.Text = exportLog()
+            end
+            logBox.Visible = not logBox.Visible
+        end)
+
+        connect(closeButton.Activated, cleanup)
+
+        local function sample()
+            local character = getCharacter()
+            if character ~= watchedCharacter then
+                watchCharacter(character)
+            end
+
+            local root = getCharacterRoot()
+            if root and not root:IsA("BasePart") then
+                root = nil
+            end
+
+            local humanoid = getHumanoid()
+            local camera = workspace.CurrentCamera
+            local skill = RuntimeFix.DebugSkillState
+            local pending = readState(skill, "pending")
+            local till = readState(skill, "till")
+
+            local tweenState = "-"
+            local tween = RuntimeFix.ActiveRootTween
+            if tween then
+                local ok, result = pcall(function()
+                    return tween.PlaybackState.Name
+                end)
+                tweenState = ok and result or "<unavailable>"
+            end
+
+            local hud = EnemyCountLabel
+                and EnemyCountLabel.Text or "<not loaded>"
+            hud = hud:gsub("%s+", " ")
+
+            local moverLines = {}
+            for object in pairs(movers) do
+                if object.Parent then
+                    local fields = {
+                        path(object),
+                        "class=" .. object.ClassName,
+                    }
+
+                    for _, property in ipairs(properties[object.ClassName]) do
+                        local ok, result = pcall(function()
+                            return object[property]
+                        end)
+
+                        if ok then
+                            table.insert(fields,
+                                property .. "=" .. valueText(result)
+                            )
+                        end
+                    end
+
+                    table.insert(moverLines, table.concat(fields, " | "))
+                end
+            end
+            table.sort(moverLines)
+
+            local collision = {}
+            for part in pairs(parts) do
+                if part.Parent and part.CanCollide then
+                    table.insert(collision, path(part))
+                end
+            end
+            table.sort(collision)
+
+            local position = root and vector(root.Position) or "-"
+            local velocity = root and vector(root.AssemblyLinearVelocity) or "-"
+            local angular = root and vector(root.AssemblyAngularVelocity) or "-"
+            local travel = valueText(RuntimeFix.DebugTravelTarget)
+            local aim = SkillAimState
+
+            local rubbleHealth = CurrentRubble
+                and CurrentRubble.Parent
+                and CurrentRubble.Parent:GetAttribute("RubbleHealth")
+
+            local lines = {
+                ("t=%.3f server=%.3f"):format(
+                    os.clock(), workspace:GetServerTimeNow()
+                ),
+                "Mode=" .. tostring(workspace:GetAttribute("Mode"))
+                    .. " Farm=" .. tostring(AutoFarmEnabled)
+                    .. " Generation=" .. tostring(RuntimeFix.FarmGeneration),
+                "Character=" .. path(character),
+                "Root=" .. position .. " Velocity=" .. velocity
+                    .. " Angular=" .. angular,
+                "Anchored=" .. tostring(root and root.Anchored)
+                    .. " Mass=" .. tostring(root and root.AssemblyMass)
+                    .. " RootCollision=" .. tostring(root and root.CanCollide),
+                "Humanoid=" .. (
+                    humanoid and humanoid:GetState().Name or "-"
+                ) .. " Floor=" .. tostring(
+                    humanoid and humanoid.FloorMaterial
+                ) .. " HP=" .. tostring(humanoid and humanoid.Health),
+                "Skill pending=" .. pending .. " till=" .. till
+                    .. " InvokeBusy=" .. tostring(RuntimeFix.SkillInvokeBusy)
+                    .. " Slot=" .. tostring(aim and aim.skillKey)
+                    .. " Aim=" .. valueText(aim and aim.lastValidAim),
+                "Tween=" .. tweenState .. " Goal=" .. travel,
+                "Camera=" .. tostring(camera and camera.CameraType)
+                    .. " Subject=" .. path(camera and camera.CameraSubject)
+                    .. " Position=" .. (
+                        camera and vector(camera.CFrame.Position) or "-"
+                    ),
+                "Area=" .. tostring(CurrentAreaName)
+                    .. " Target=" .. path(CurrentTarget),
+                "Rubble=" .. path(CurrentRubble)
+                    .. " HP=" .. tostring(rubbleHealth)
+                    .. " Arrived=" .. tostring(RubbleTeleported),
+                "HUD=" .. hud,
+                "Collidable=" .. table.concat(collision, ", "),
+                "Movers:\n" .. table.concat(moverLines, "\n"),
+                "----",
+            }
+
+            push(table.concat(lines, "\n"))
+
+            live.Text = table.concat({
+                "บันทึก " .. count .. "/" .. CAPACITY .. " samples",
+                "Root: " .. position,
+                "Velocity: " .. velocity,
+                "Skill: pending=" .. pending .. " till=" .. till,
+                "InvokeBusy: " .. tostring(RuntimeFix.SkillInvokeBusy),
+                "Tween: " .. tweenState,
+                "Camera: " .. tostring(camera and camera.CameraType),
+                "Movers: " .. #moverLines .. " | " .. hud,
+            }, "\n")
+        end
+
+        connect(RunService.Heartbeat, function(deltaTime)
+            if AutoFarmSession.Cancelled then
+                cleanup()
+                return
+            end
+
+            elapsed += deltaTime
+            if frozen or elapsed < INTERVAL then
+                return
+            end
+            elapsed = 0
+
+            local ok, err = pcall(sample)
+            if not ok then
+                setFrozen(true)
+                push("DEBUG SAMPLE ERROR: " .. tostring(err))
+                live.Text = "DEBUG ERROR: " .. tostring(err)
+            end
+        end)
+    end
+
+    RuntimeFix.startMobileDebug()
 
     local function StartAutoFarm()
         if AutoFarmEnabled then
