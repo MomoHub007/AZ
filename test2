@@ -5183,10 +5183,40 @@ RuntimeFix.FarmOptions = {
     end
 
     function RuntimeFix.pauseFarmForSkill()
-        if AutoFarmSession.Cancelled
-            or not AutoFarmEnabled
-            or not isGameSkillBusy()
+        if AutoFarmSession.Cancelled or not AutoFarmEnabled then
+            return false
+        end
+
+        local skillBusy = isGameSkillBusy()
+        local touchInput =
+            game:GetService("UserInputService").TouchEnabled
+
+        if touchInput
+            and (RuntimeFix.SkillInvokeBusy or skillBusy)
         then
+            -- Cleanup อาจคืนค่าแรงพยุง จึงต้องทำก่อนปิดแรง
+            if RuntimeFix.RootTweenCleanup then
+                RuntimeFix.RootTweenCleanup()
+            end
+
+            if AlignPosition and AlignPosition.Parent then
+                AlignPosition.Enabled = false
+            end
+
+            if AlignOrientation and AlignOrientation.Parent then
+                AlignOrientation.Enabled = false
+            end
+
+            local force = RuntimeFix.RubbleFloatForce
+
+            if force and force.Parent then
+                force.Enabled = false
+            end
+
+            return true
+        end
+
+        if not skillBusy then
             return false
         end
 
@@ -6416,6 +6446,12 @@ RuntimeFix.FarmOptions = {
         RuntimeFix.SkillInvokeBusy = true
 
         local success, result = xpcall(function()
+            -- ปลดการควบคุมก่อนเริ่มสกิล
+            -- ไม่ต้องรอ pending/till ของเกมอัปเดต
+            if touchInput then
+                RuntimeFix.pauseFarmForSkill()
+            end
+
             changeIdentity(2)
 
             return RuntimeFix.invokeAutoSkill(
