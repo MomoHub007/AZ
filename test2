@@ -3928,6 +3928,11 @@ RuntimeFix.FarmOptions = {
                 )
         end
 
+        -- ต้องตรวจให้ผ่านก่อนถึง stopHover() และการย้ายตัวละคร
+        if isUsingSkill() then
+            return false
+        end
+
         local floodContext =
             RuntimeFix.isFlood() and RuntimeFix.floodKey()
 
@@ -5252,13 +5257,13 @@ RuntimeFix.FarmOptions = {
     end
 
     function RuntimeFix.repairFarmCamera()
+        RuntimeFix.FarmCameraRecovery = nil
+
         if not AutoFarmEnabled
             or AutoFarmSession.Cancelled
             or RuntimeFix.EndRoundPaused
             or PlayerGui:GetAttribute("EndScreenActive") == true
-            or isGameSkillBusy()
         then
-            RuntimeFix.FarmCameraRecovery = nil
             return
         end
 
@@ -5266,43 +5271,38 @@ RuntimeFix.FarmOptions = {
         local character = getCharacter()
         local humanoid = getHumanoid()
 
-        if not camera or not character or not humanoid
+        if not camera
+            or not character
+            or not humanoid
             or humanoid.Parent ~= character
             or humanoid.Health <= 0
         then
-            RuntimeFix.FarmCameraRecovery = nil
             return
         end
 
-        if camera.CameraType == Enum.CameraType.Scriptable then
-            local recovery = RuntimeFix.FarmCameraRecovery
-
-            if not recovery
-                or recovery.Camera ~= camera
-                or recovery.Humanoid ~= humanoid
-            then
-                RuntimeFix.FarmCameraRecovery = {
-                    Camera = camera,
-                    Humanoid = humanoid,
-                    IdleSince = os.clock(),
-                }
-
-                return
-            end
-
-            if os.clock() - recovery.IdleSince < 1 then
-                return
-            end
-
-            camera.CameraSubject = humanoid
-            camera.CameraType = Enum.CameraType.Custom
+        if camera.CameraType ~= Enum.CameraType.Custom then
+            return
         end
 
-        RuntimeFix.FarmCameraRecovery = nil
+        local subject = camera.CameraSubject
+        local previousHumanoid = RuntimeFix.FarmCameraHumanoid
 
-        if camera.CameraType == Enum.CameraType.Custom
-            and camera.CameraSubject ~= humanoid
-        then
+        local needsRepair = not subject
+            or not subject.Parent
+            or (
+                subject ~= humanoid
+                and (
+                    subject == previousHumanoid
+                    or (
+                        subject:IsA("Humanoid")
+                        and subject.Health <= 0
+                    )
+                )
+            )
+
+        RuntimeFix.FarmCameraHumanoid = humanoid
+
+        if needsRepair then
             camera.CameraSubject = humanoid
         end
     end
@@ -13710,7 +13710,8 @@ end)
                     continue
                 end
 
-                if RuntimeFix.pauseFarmForSkill() then
+                -- รอทุกสกิลจบก่อนเปลี่ยนเป้าหมายหรือเริ่มเดินทาง
+                if isGameSkillBusy() then
                     task.wait(0.05)
                     continue
                 end
