@@ -4714,6 +4714,41 @@ RuntimeFix.FarmOptions = {
                 and not RuntimeFix.isRubbleBroken(rubble)
         end
 
+        local groundRubble = game:GetService("UserInputService").TouchEnabled
+        if groundRubble then
+            if not MapFolder or not MapFolder:IsDescendantOf(workspace) then
+                RuntimeFix.RubbleRepeatToken = nil
+                return false
+            end
+
+            local params = RaycastParams.new()
+            params.FilterType = Enum.RaycastFilterType.Include
+            params.FilterDescendantsInstances = { MapFolder }
+            params.RespectCanCollide = true
+            params.IgnoreWater = true
+
+            local hit = workspace:Raycast(
+                targetCFrame.Position + Vector3.new(0, 16, 0),
+                Vector3.new(0, -128, 0),
+                params
+            )
+
+            if not hit or not hit.Instance:IsA("BasePart") or not hit.Instance.CanCollide or hit.Normal.Y < 0.5 then
+                RuntimeFix.RubbleRepeatToken = nil
+                RuntimeFix.RubbleGroundWarnAt = RuntimeFix.RubbleGroundWarnAt or -math.huge
+                if os.clock() - RuntimeFix.RubbleGroundWarnAt >= 5 then
+                    RuntimeFix.RubbleGroundWarnAt = os.clock()
+                    warn("[Rubble Mobile] Walkable floor unavailable")
+                end
+                return false
+            end
+
+            local clearance = math.max(humanoid.HipHeight, 0) + root.Size.Y * 0.5
+            targetCFrame = CFrame.new(
+                hit.Position + Vector3.new(0, clearance, 0)
+            ) * targetCFrame.Rotation
+        end
+
         root.Anchored = false
         humanoid.AutoRotate = false
 
@@ -4729,6 +4764,19 @@ RuntimeFix.FarmOptions = {
 
         root.AssemblyLinearVelocity = Vector3.zero
         root.AssemblyAngularVelocity = Vector3.zero
+
+        -- Touch: ถึงพื้นแล้วปล่อยยืน ไม่สร้างแรงพยุง
+        if groundRubble then
+            RuntimeFix.WaitingStand = {
+                Root = root,
+                Area = areaKey,
+                Rubble = rubble,
+                WasCanCollide = root.CanCollide,
+            }
+            root.CanCollide = true
+            humanoid.AutoRotate = true
+            return true
+        end
 
         local attachment = Instance.new("Attachment")
         attachment.Name = "AutoRubbleFloatAttachment"
@@ -6929,9 +6977,13 @@ RuntimeFix.FarmOptions = {
 
         -- เคยไปถึงแล้ว แต่ลูปพยุงหรืออุปกรณ์พยุงหายไป:
         -- ให้เริ่ม Tween + Hover ใหม่
+        local standing = RuntimeFix.WaitingStand
+        local groundedRubble = standing and standing.Root == getCharacterRoot() and standing.Rubble == CurrentRubble
+
         if RubbleTeleported
             and CurrentRubble
             and not RuntimeFix.isRubbleBroken(CurrentRubble)
+            and not groundedRubble
             and (
                 RuntimeFix.RubbleRepeatToken == nil
                 or not RuntimeFix.RubbleFloatForce
@@ -13593,6 +13645,16 @@ end)
                 for _, v in ipairs(char:GetDescendants()) do
                     if v:IsA("BasePart") then
                         if RuntimeFix.isFloodGateStanding() then
+                            local saved = RuntimeFix.FarmCollisionSaved
+                            local original = saved and saved[v]
+
+                            if v == waiting.Root then
+                                v.CanCollide = true
+                            elseif original ~= nil then
+                                v.CanCollide = original
+                            end
+
+                        elseif waiting and waiting.Rubble then
                             local saved = RuntimeFix.FarmCollisionSaved
                             local original = saved and saved[v]
 
