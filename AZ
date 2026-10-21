@@ -1367,7 +1367,10 @@ end
 
                             if type(chance) == "table" then
                                 chance = chance[
-                                    difficultyNames[difficulty]
+                                    difficultyNames[
+                                        map == "floodescape"
+                                            and 3 or difficulty
+                                    ]
                                 ]
                             end
 
@@ -1385,9 +1388,8 @@ end
                             Map = map,
                             Chapter = map == "floodescape"
                                 and 0 or chapter,
-                            Difficulty = map == "hxh"
-                                and difficulty
-                                or 4,
+                            Difficulty = map == "floodescape" and 3
+                                or (map == "hxh" and difficulty or 4),
                             Coverage = coverage,
                             Rarest = rarest,
                         })
@@ -1770,7 +1772,7 @@ end
 
             request.chapter = 0
             request.floor = 0
-            request.difficulty = 4
+            request.difficulty = 3
 
         else
             request.floor = 0
@@ -7635,15 +7637,6 @@ RuntimeFix.FarmOptions = {
             waiting.NextFloorCheck = now + 0.5
         end
 
-        local water = workspace:GetAttribute("FloodLevel")
-
-        if type(water) ~= "number" then
-            error("Hold Gate: FloodLevel unavailable")
-        end
-
-        if water >= waiting.FloorY then
-            error("Hold Gate: floor is submerged; ground standing stopped")
-        end
 
         IsHealing = false
         RuntimeFix.FloodCombatGate = nil
@@ -7665,20 +7658,6 @@ RuntimeFix.FarmOptions = {
     end
 
     function RuntimeFix.floodSafe(position)
-        if RuntimeFix.isFloodGateStanding() then
-            return position
-        end
-
-        local water = workspace:GetAttribute("FloodLevel")
-
-        if RuntimeFix.isFlood() and type(water) == "number" then
-            return Vector3.new(
-                position.X,
-                math.max(position.Y, water + 8),
-                position.Z
-            )
-        end
-
         return position
     end
 
@@ -7707,12 +7686,7 @@ RuntimeFix.FarmOptions = {
 
         local center = gate.Position
         local radius = 17 -- เว้นขอบจากรัศมีจริง 18 studs
-        local water = workspace:GetAttribute("FloodLevel")
         local minY = center.Y - radius
-
-        if type(water) == "number" then
-            minY = math.max(minY, water + 8)
-        end
 
         if minY > center.Y + radius then
             return nil
@@ -11588,7 +11562,7 @@ function RuntimeFix.getCrimsonFarmStage(data)
         return {
             Map = "floodescape",
             Chapter = 0,
-            Difficulty = 4,
+            Difficulty = 3,
         }, "Crimson Eclipse materials -> Flood Escape"
     end
 
@@ -11724,7 +11698,7 @@ function RuntimeFix.runCrimsonEclipse()
             map = "Flood",
             chapter = 0,
             floor = 0,
-            difficulty = 4,
+            difficulty = 3,
             maxPlayers = 1,
             friendsOnly = false,
             roomNumber = CurrentLobbyRoomNumber,
@@ -12050,8 +12024,9 @@ end
         end
 
         RuntimeFix.igrisLog(string.format(
-            "%s | %s Chapter %d Nightmare",
-            plan.Reason, target.Map, target.Chapter
+            "%s | %s Chapter %d %s",
+            plan.Reason, target.Map, target.Chapter,
+            isFlood and "Hard" or "Nightmare"
         ))
 
         return true
@@ -22771,7 +22746,11 @@ RuntimeFix.startMirrorBlessing()
 
                         if currentMap == "floodescape" then
                             huntingAction =
-                                (target and target.Map == "floodescape") and 1 or 3
+                                (
+                                    target
+                                    and target.Map == "floodescape"
+                                    and difficulty == 3
+                                ) and 1 or 3
                         end
                     end
 
