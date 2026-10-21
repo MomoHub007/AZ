@@ -14302,10 +14302,6 @@ end)
         end
 
         local protected = {
-            sukuna = true,
-            miyabi = true,
-            cataclysm = true,
-            katakuri = true,
             hutao = true,
             sung_jinwoo = true,
             frieren = true,
