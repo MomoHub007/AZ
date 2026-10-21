@@ -7713,18 +7713,24 @@ do
 
             stopHover()
 
-            local pivotOffset = root.CFrame:ToObjectSpace(
-                character:GetPivot()
+            local arrived = RuntimeFix.tweenRootTo(
+                CFrame.new(66, 282, -234) * root.CFrame.Rotation,
+                function()
+                    return isFateRaid()
+                        and getCharacter() == character
+                        and getCharacterRoot() == root
+                        and root.Parent ~= nil
+                        and humanoid.Parent ~= nil
+                        and humanoid.Health > 0
+                        and not RuntimeFix.EndRoundPaused
+                        and PlayerGui:GetAttribute("EndScreenActive") ~= true
+                end
             )
 
-            character:PivotTo(
-                CFrame.new(66, 282, -234)
-                    * root.CFrame.Rotation
-                    * pivotOffset
-            )
-
-            root.AssemblyLinearVelocity = Vector3.zero
-            root.AssemblyAngularVelocity = Vector3.zero
+            if not arrived then
+                -- ยังไม่ถึง ห้ามบันทึกว่าเข้า Arena สำเร็จ
+                return true
+            end
 
             RuntimeFix.FateArenaCharacter = character
             CurrentAreaName = getLiveFarmArea() or "1"
