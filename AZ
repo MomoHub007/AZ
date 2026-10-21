@@ -18932,7 +18932,23 @@ end)
             elseif AutoFarmEnabled then
                 action = "กำลังรอมอน"
             else
-                action = "หยุด Auto Farm"
+                if RuntimeFix.FarmLastError then
+                    local failure = tostring(RuntimeFix.FarmLastError)
+                    local firstLine =
+                        failure:match("^[^\r\n]+") or failure
+
+                    action = "หยุด Auto Farm | Error ล่าสุด: "
+                        .. firstLine
+
+                elseif not AZEnabled("Combat", "AutoFarm") then
+                    action = "ปิด Auto Farm ในการตั้งค่า"
+
+                elseif AutoFarmSession.Cancelled then
+                    action = "Session ถูกยกเลิก"
+
+                else
+                    action = "Auto Farm ยังไม่เริ่ม หรือถูกสั่งหยุด"
+                end
             end
 
             return action .. " | เป้าหมาย: " .. goal
