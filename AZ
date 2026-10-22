@@ -7960,9 +7960,19 @@ RuntimeFix.FarmOptions = {
                 or (floor == 0 and "Parking" or "Floor" .. floor)
         )
 
-        local origin = RuntimeFix.floodPoint(
-            marker and marker:FindFirstChild("Respawn")
-        ) or RuntimeFix.floodPoint(marker)
+        local respawn = marker
+            and marker:FindFirstChild("Respawn")
+
+        if not respawn or not respawn:IsA("BasePart") then
+            local spawns = marker
+                and marker:FindFirstChild("EnemySpawns")
+
+            respawn = spawns
+                and spawns:FindFirstChildWhichIsA("BasePart")
+        end
+
+        local origin = RuntimeFix.floodPoint(respawn)
+            or RuntimeFix.floodPoint(marker)
 
         if roof and not origin then
             origin = RuntimeFix.floodPoint(
@@ -7970,18 +7980,22 @@ RuntimeFix.FarmOptions = {
             )
         end
 
-        if floor > 0
-            and not origin
+        if not origin
             and workspace:GetAttribute("FloodLeverAt") == nil
         then
             stopHover()
-            RuntimeFix.floodStatus("รอ Marker ของชั้นปัจจุบัน")
+
+            RuntimeFix.floodStatus(
+                floor == 0
+                    and "Parking | รอ Respawn / EnemySpawns โหลด"
+                    or "รอ Marker ของชั้นปัจจุบัน"
+            )
+
             return
         end
 
-        -- พิกัดที่ผู้ใช้ยืนยันสำหรับชั้น 10
-        local floor10ClearPoint = floor == 10 and not roof
-            and Vector3.new(-191, 549, -19) or nil
+        -- ใช้ Marker และระบบต่อสู้ปกติของชั้นปัจจุบัน
+        local floor10ClearPoint = nil
 
         local label = roof and "Roof" or ("Floor " .. floor)
 
@@ -13573,11 +13587,28 @@ end)
             local map = world and world:FindFirstChild("Map")
             local remote = ReplicatedStorage:FindFirstChild("performM1")
 
-            if not label or not label:IsA("TextLabel")
-                or not areas or not map
-                or not remote or not remote:IsA("RemoteEvent") then
+            if not map
+                or not remote
+                or not remote:IsA("RemoteEvent")
+            then
+                RuntimeFix.FarmGameplayWait =
+                    "รอ World.Map / performM1"
                 return false
             end
+
+            if not RuntimeFix.isFlood()
+                and (
+                    not label
+                    or not label:IsA("TextLabel")
+                    or not areas
+                )
+            then
+                RuntimeFix.FarmGameplayWait =
+                    "รอ EnemyCount / World.Areas"
+                return false
+            end
+
+            RuntimeFix.FarmGameplayWait = nil
 
             EnemyCountLabel = label
             SkillsFolder = main and main:FindFirstChild("skills")
@@ -18892,7 +18923,20 @@ end)
             end
 
             local action
-            if CurrentTarget and isEnemyAlive(CurrentTarget) then
+
+            if RuntimeFix.isFlood() and AutoFarmEnabled then
+                action = RuntimeFix.FarmGameplayWait
+                    or RuntimeFix.FloodMessage
+                    or "รอเริ่มระบบ Flood"
+
+                action = action
+                    .. " [Floor="
+                    .. tostring(workspace:GetAttribute("FloodFloor"))
+                    .. " Phase="
+                    .. tostring(workspace:GetAttribute("FloodPhase"))
+                    .. "]"
+
+            elseif CurrentTarget and isEnemyAlive(CurrentTarget) then
                 action = "กำลังต่อสู้"
             elseif RuntimeFix.ActiveRootTween then
                 action = "กำลังเคลื่อนที่"
@@ -23290,10 +23334,17 @@ RuntimeFix.startMirrorBlessing()
                     and roundHUD.Container.TopPart:FindFirstChild("RemainingFrame")
                     and roundHUD.Container.TopPart.RemainingFrame:FindFirstChild("EnemyCount")
 
-                if enemyCountLabel
-                    and areasFolder
-                    and mapFolder
+                if mapFolder
                     and performM1
+                    and performM1:IsA("RemoteEvent")
+                    and (
+                        RuntimeFix.isFlood()
+                        or (
+                            enemyCountLabel
+                            and enemyCountLabel:IsA("TextLabel")
+                            and areasFolder
+                        )
+                    )
                 then
                     EnemyCountLabel = enemyCountLabel
                     SkillsFolder = skillsFolder
