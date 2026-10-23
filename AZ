@@ -8174,6 +8174,68 @@ RuntimeFix.FarmOptions = {
                 ) < 30
         end
 
+        local spawnMinY, spawnMaxY
+
+        if floor == 10 and not roof then
+            local spawns = marker
+                and marker:FindFirstChild("EnemySpawns")
+
+            local cached = RuntimeFix.FloodTenSpawnBounds
+
+            if spawns then
+                if not cached
+                    or cached.Marker ~= marker
+                    or cached.Spawns ~= spawns
+                    or os.clock() >= cached.ExpiresAt
+                then
+                    local low, high
+
+                    for _, spawn in ipairs(spawns:GetChildren()) do
+                        if spawn:IsA("BasePart") then
+                            local y = spawn.Position.Y
+                            low = low and math.min(low, y) or y
+                            high = high and math.max(high, y) or y
+                        end
+                    end
+
+                    cached = {
+                        Marker = marker,
+                        Spawns = spawns,
+                        Low = low,
+                        High = high,
+                        ExpiresAt = os.clock() + 1,
+                    }
+
+                    RuntimeFix.FloodTenSpawnBounds = cached
+                end
+
+                spawnMinY = cached.Low
+                spawnMaxY = cached.High
+            else
+                RuntimeFix.FloodTenSpawnBounds = nil
+            end
+        end
+
+        local function inCurrentFloor(part)
+            if not part then
+                return false
+            end
+
+            if floor == 0 or not origin then
+                return true
+            end
+
+            local y = part.Position.Y
+
+            return math.abs(y - origin.Y) < 30
+                or (
+                    spawnMinY ~= nil
+                    and spawnMaxY ~= nil
+                    and y >= spawnMinY - 30
+                    and y <= spawnMaxY + 30
+                )
+        end
+
         -- ย้ายตามชั้นที่ Server เปิดแล้วเท่านั้น
         local floorToken = tostring(floor) .. ":" .. tostring(roof)
 
@@ -8232,12 +8294,8 @@ RuntimeFix.FarmOptions = {
             if part
                 and isEnemyAlive(enemy)
                 and part.Position.Y > water
-                and (
-                    not origin
-                    or floor == 0
-                    or math.abs(part.Position.Y - origin.Y) < 30
-                    or inFloor10Zone(part)
-                ) then
+                and inCurrentFloor(part)
+            then
 
                 local d = (part.Position - root.Position).Magnitude
 
@@ -8471,12 +8529,8 @@ RuntimeFix.FarmOptions = {
                 if not part
                     or not isEnemyAlive(CurrentTarget)
                     or part.Position.Y <= water
-                    or (
-                        origin
-                        and floor ~= 0
-                        and math.abs(part.Position.Y - origin.Y) >= 30
-                        and not inFloor10Zone(part)
-                    ) then
+                    or not inCurrentFloor(part)
+                then
 
                     stopHover()
                 end
@@ -8514,8 +8568,23 @@ RuntimeFix.FarmOptions = {
                     useReadySkills()
                 end
             else
+                local details = string.format(
+                    " | enemies=%d OriginY=%s SpawnY=%s..%s Water=%.1f",
+                    #enemies:GetChildren(),
+                    origin and string.format("%.1f", origin.Y) or "?",
+                    spawnMinY and string.format("%.1f", spawnMinY) or "?",
+                    spawnMaxY and string.format("%.1f", spawnMaxY) or "?",
+                    water
+                )
+
                 RuntimeFix.floodStatus(
-                    label .. " | รอศัตรู / รอ Server"
+                    label
+                        .. (
+                            best
+                                and " | พบมอน แต่เริ่ม startHover ไม่สำเร็จ"
+                                or " | ไม่มีมอนผ่านตัวกรอง"
+                        )
+                        .. details
                 )
 
                 RuntimeFix.floodHold(
