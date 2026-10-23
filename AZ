@@ -1840,6 +1840,20 @@ end
             error("AutoJoin blocked: Trait state changed")
         end
 
+        if request.gamemode == "Escape"
+            and request.map == "Flood"
+        then
+            if not RuntimeFix.equipPostMonarchActive("sung_jinwoo") then
+                error(
+                    "เข้า Flood ไม่ได้: ยังยืนยัน Sung Jinwoo เป็นตัวหลักไม่สำเร็จ"
+                )
+            end
+
+            if AutoFarmSession.Cancelled then
+                return false
+            end
+        end
+
         -- เริ่มจับเวลาก่อนส่ง เผื่อ fire เกิดข้อผิดพลาด
         -- โดยที่คำขออาจถูกส่งออกไปแล้ว
         RuntimeFix.markQueueRequestSent()
@@ -6772,46 +6786,8 @@ RuntimeFix.FarmOptions = {
     end
 
     local function handleRaidState()
-        -- Fate: วาร์ปเข้าจุดเริ่มต่อสู้ครั้งเดียวเมื่อพบมอน
+        -- Fate: เข้าจุดกลางก่อนรอศัตรู ไม่ผูกกับข้อความเริ่มเกม
         if isFateRaid() then
-            local startCharacter = getCharacter()
-            local starting = string.find(
-                string.lower(getRaidStatus()),
-                "starting nightmare", 1, true
-            ) ~= nil
-
-            if starting then
-                if not startCharacter then
-                    return true
-                end
-
-                if RuntimeFix.FateStartCharacter ~= startCharacter
-                    and os.clock() - LastRaidStartTeleport
-                        >= RAID_RETELEPORT_DELAY
-                then
-                    LastRaidStartTeleport = os.clock()
-                    stopHover()
-
-                    local arrived = RuntimeFix.tweenRootTo(
-                        CFrame.new(66, 282, -234),
-                        function()
-                            return isFateRaid()
-                                and getCharacter() == startCharacter
-                                and string.find(
-                                    string.lower(getRaidStatus()),
-                                    "starting nightmare", 1, true
-                                ) ~= nil
-                        end
-                    )
-
-                    if arrived then
-                        RuntimeFix.FateStartCharacter = startCharacter
-                    end
-                end
-
-                return true
-            end
-
             local character = getCharacter()
             local root = getCharacterRoot()
             local humanoid = getHumanoid()
@@ -6819,7 +6795,10 @@ RuntimeFix.FarmOptions = {
             if not character
                 or not root
                 or not humanoid
-                or humanoid.Health <= 0 then
+                or humanoid.Health <= 0
+                or AutoFarmSession.Cancelled
+                or not AutoFarmEnabled
+            then
                 return true
             end
 
@@ -6827,47 +6806,42 @@ RuntimeFix.FarmOptions = {
                 return false
             end
 
-            local enemies = workspace:FindFirstChild("enemies")
-            local foundEnemy = false
-
-            for _, enemy in ipairs(
-                enemies and enemies:GetChildren() or {}
-            ) do
-                if enemy:IsA("Model")
-                    and isEnemyAlive(enemy)
-                    and getEnemyRoot(enemy) then
-
-                    foundEnemy = true
-                    break
-                end
-            end
-
-            if not foundEnemy then return true end
-
-            if AutoFarmSession.Cancelled
-                or not AutoFarmEnabled then
+            if RuntimeFix.ActiveRootTween
+                or os.clock() - LastRaidStartTeleport
+                    < RAID_RETELEPORT_DELAY
+            then
                 return true
             end
 
+            LastRaidStartTeleport = os.clock()
             stopHover()
 
-            local pivotOffset = root.CFrame:ToObjectSpace(
-                character:GetPivot()
+            local arrived = RuntimeFix.tweenRootTo(
+                CFrame.new(66, 282, -234) * root.CFrame.Rotation,
+                function()
+                    return not AutoFarmSession.Cancelled
+                        and AutoFarmEnabled
+                        and isFateRaid()
+                        and getCharacter() == character
+                        and getCharacterRoot() == root
+                        and humanoid.Parent == character
+                        and humanoid.Health > 0
+                        and not RuntimeFix.EndRoundPaused
+                        and PlayerGui:GetAttribute("EndScreenActive") ~= true
+                end
             )
 
-            character:PivotTo(
-                CFrame.new(66, 282, -234)
-                    * root.CFrame.Rotation
-                    * pivotOffset
-            )
-
-            root.AssemblyLinearVelocity = Vector3.zero
-            root.AssemblyAngularVelocity = Vector3.zero
+            if not arrived then
+                AutoSkillWarn(
+                    "[FateRaid] Tween เข้าจุดกลางยังไม่สำเร็จ จะลองใหม่"
+                )
+                return true
+            end
 
             RuntimeFix.FateArenaCharacter = character
+            RuntimeFix.FateStartCharacter = character
             CurrentAreaName = getLiveFarmArea() or "1"
 
-            -- ปล่อยให้ Auto Farm เลือกและตามมอนต่อทันที
             return false
         end
 
@@ -13028,6 +13002,10 @@ end
 
             if not data then
                 error(readError)
+            end
+
+            if workspace:GetAttribute("Mode") == "floodescape" then
+                return RuntimeFix.equipPostMonarchActive("sung_jinwoo")
             end
 
             if RuntimeFix.trialsEvolutionComplete(data)
