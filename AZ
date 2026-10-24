@@ -7945,6 +7945,26 @@ RuntimeFix.FarmOptions = {
                 and spawns:FindFirstChildWhichIsA("BasePart")
         end
 
+        -- ชั้น 10: ช่วงต่อสู้ใช้พื้น EnemySpawns
+        -- Respawn ของชั้นนี้อยู่บริเวณทางออกด้านบน
+        if floor == 10 and not roof and phase == "fight" then
+            local spawns = marker
+                and marker:FindFirstChild("EnemySpawns")
+
+            local combatSpawn = spawns
+                and spawns:FindFirstChildWhichIsA("BasePart")
+
+            if not combatSpawn then
+                stopHover()
+                RuntimeFix.floodStatus(
+                    "Floor 10 | รอ EnemySpawns ของพื้นต่อสู้โหลด"
+                )
+                return
+            end
+
+            respawn = combatSpawn
+        end
+
         local origin = RuntimeFix.floodPoint(respawn)
             or RuntimeFix.floodPoint(marker)
 
