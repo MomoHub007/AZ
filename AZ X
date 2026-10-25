@@ -8838,12 +8838,19 @@ do
 
         local gateBoss, gateBossDistance
         local gateEnemy, gateEnemyDistance
+        local hasLivingEnemy = false
 
         for _, enemy in ipairs(enemies:GetChildren()) do
+            local alive = isEnemyAlive(enemy)
+
+            if alive then
+                hasLivingEnemy = true
+            end
+
             local part = getEnemyRoot(enemy)
 
             if part
-                and isEnemyAlive(enemy)
+                and alive
                 and part.Position.Y > water
                 and (
                     not origin
@@ -8907,6 +8914,106 @@ do
                     end
                 end
             end
+        end
+
+        if hasLivingEnemy then
+            RuntimeFix.FloodEmptySpawnVisit = nil
+
+        elseif phase == "fight" and not roof then
+            if AutoFarmSession.Cancelled
+                or not AutoFarmEnabled
+                or RuntimeFix.EndRoundPaused
+                or RuntimeFix.floodKey() ~= key
+                or RuntimeFix.pauseFarmForSkill()
+            then
+                return
+            end
+
+            local spawns = marker
+                and marker:FindFirstChild("EnemySpawns")
+
+            local visit = RuntimeFix.FloodEmptySpawnVisit
+
+            if visit
+                and visit.Key == key
+                and visit.Root == root
+                and visit.Spawns == spawns
+                and visit.Spawn.Parent == spawns
+            then
+                RuntimeFix.floodStatus(
+                    label .. " | ไม่มีมอน: รอที่ EnemySpawns"
+                )
+                RuntimeFix.floodHold(visit.Position)
+                return
+            end
+
+            RuntimeFix.FloodEmptySpawnVisit = nil
+
+            local spawnPart
+
+            if spawns then
+                for _, candidate in ipairs(spawns:GetChildren()) do
+                    if candidate:IsA("BasePart")
+                        and candidate.Position.Y > water
+                    then
+                        spawnPart = candidate
+                        break
+                    end
+                end
+            end
+
+            if not spawnPart then
+                stopHover()
+                RuntimeFix.floodStatus(
+                    label .. " | รอ EnemySpawns ที่อยู่เหนือน้ำโหลด"
+                )
+                return
+            end
+
+            local character = getCharacter()
+
+            if not character
+                or not character:IsA("Model")
+                or getCharacterRoot() ~= root
+                or not root:IsDescendantOf(character)
+                or not humanoid.Parent
+                or humanoid.Health <= 0
+            then
+                return
+            end
+
+            stopHover()
+
+            local destination =
+                spawnPart.Position + Vector3.new(0, 3, 0)
+
+            -- รักษาระยะระหว่าง Model Pivot กับ Root ของตัวละคร
+            local pivotOffset =
+                root.CFrame:ToObjectSpace(character:GetPivot())
+
+            character:PivotTo(
+                CFrame.new(destination)
+                    * root.CFrame.Rotation
+                    * pivotOffset
+            )
+
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+
+            RuntimeFix.FloodEmptySpawnVisit = {
+                Key = key,
+                Root = root,
+                Spawns = spawns,
+                Spawn = spawnPart,
+                Position = destination,
+            }
+
+            RuntimeFix.floodStatus(
+                label .. " | ไม่มีมอน: วาปไป EnemySpawns"
+            )
+
+            RuntimeFix.floodHold(destination)
+            return
         end
 
         -- มอนทั่วไปลอยตีภายใน Gate; บอสออกไปไล่ได้
@@ -9123,6 +9230,49 @@ do
         end
 
         if phase == "drain" then
+            if floor == 0 and not roof then
+                local nextMarker = markers
+                    and markers:FindFirstChild("Floor1")
+
+                local nextRespawn = nextMarker
+                    and nextMarker:FindFirstChild("Respawn")
+
+                if not nextRespawn
+                    or not nextRespawn:IsA("BasePart")
+                then
+                    stopHover()
+                    RuntimeFix.floodStatus(
+                        "Parking | Drain: รอ Floor1.Respawn โหลด"
+                    )
+                    return
+                end
+
+                RuntimeFix.floodStatus(
+                    "Parking | Drain: Tween ขึ้นชั้น 1"
+                )
+
+                -- ใช้ Tween และระบบ Hold/Cleanup เดิม
+                local arrived = RuntimeFix.floodHold(
+                    nextRespawn.Position
+                )
+
+                -- ระหว่าง Tween อาจเปลี่ยน Phase หรือ Respawn
+                if not arrived
+                    or getCharacterRoot() ~= root
+                    or not root.Parent
+                    or not humanoid.Parent
+                    or humanoid.Health <= 0
+                    or RuntimeFix.floodKey() ~= key
+                then
+                    return
+                end
+
+                RuntimeFix.floodStatus(
+                    "Parking | ถึงจุดชั้น 1 รอ Server เปลี่ยน State"
+                )
+                return
+            end
+
             RuntimeFix.floodStatus(
                 label .. " | Drain: รอ Server เปิดชั้นถัดไป"
             )
