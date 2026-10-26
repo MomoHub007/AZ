@@ -11217,9 +11217,17 @@ RuntimeFix.FarmOptions = {
     }
 
     function RuntimeFix.getTrialsEvolutionPlan(data)
-        if not RuntimeFix.trialsReady(data)
-            or not RuntimeFix.findOwnedSlot(data, "rin")
-            or not RuntimeFix.findOwnedSlot(data, "frieren")
+        if not RuntimeFix.trialsReady(data) then
+            return nil
+        end
+
+        -- หลัง Evo Trials ครบแล้ว อนุญาตให้ตัวเดิมอยู่ Storage
+        -- เพื่อเดินแผน Solar Evo -> Crimson Evo ต่อ
+        if not RuntimeFix.trialsEvolutionComplete(data)
+            and (
+                not RuntimeFix.findOwnedSlot(data, "rin")
+                or not RuntimeFix.findOwnedSlot(data, "frieren")
+            )
         then
             return nil
         end
